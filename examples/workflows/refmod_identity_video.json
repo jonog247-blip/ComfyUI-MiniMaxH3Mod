@@ -1,0 +1,870 @@
+{
+ "last_node_id": 15,
+ "nodes": [
+  {
+   "id": 1,
+   "type": "Note",
+   "pos": [
+    40,
+    20
+   ],
+   "size": [
+    520,
+    400
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [],
+   "properties": {},
+   "widgets_values": [
+    "RefMod identity video \u2014 full generation.\n\nNeeds (in ComfyUI/models/):\n  diffusion_models/  the MiniMax-H3 video DiT\n  text_encoders/     the MiniMax-H3 Qwen3-VL CLIP\n  vae/               minimax_h3_video_vae_fp16.safetensors\n  vae/               the MiniMax-H3 audio VAE (or bypass the two audio\n                     nodes + the CreateVideo audio link for silent video)\n\nPick your own file names in the three loaders. The RefMod slot is\npre-set to vanellope_example, the mod that ships in this pack's mods/\nfolder \u2014 replace it with one of your own (press R to refresh the list).\n\nCompare against the same prompt with retention 0 to see what the RefMod\nactually contributes. Sampler settings are a starting point, not gospel."
+   ],
+   "color": "#432",
+   "bgcolor": "#653"
+  },
+  {
+   "id": 2,
+   "type": "UNETLoader",
+   "pos": [
+    40,
+    480
+   ],
+   "size": [
+    360,
+    90
+   ],
+   "flags": {},
+   "order": 1,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "MODEL",
+     "type": "MODEL",
+     "links": [
+      1
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "UNETLoader"
+   },
+   "widgets_values": [
+    "minimax_h3_video_dit.safetensors",
+    "default"
+   ]
+  },
+  {
+   "id": 3,
+   "type": "MiniMaxH3SigmaShift",
+   "pos": [
+    450,
+    480
+   ],
+   "size": [
+    330,
+    110
+   ],
+   "flags": {},
+   "order": 2,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "model",
+     "type": "MODEL",
+     "link": 1
+    }
+   ],
+   "outputs": [
+    {
+     "name": "MODEL",
+     "type": "MODEL",
+     "links": [
+      8
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "MiniMaxH3SigmaShift"
+   },
+   "widgets_values": [
+    12.0,
+    3.0
+   ]
+  },
+  {
+   "id": 4,
+   "type": "CLIPLoader",
+   "pos": [
+    40,
+    620
+   ],
+   "size": [
+    360,
+    130
+   ],
+   "flags": {},
+   "order": 3,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "CLIP",
+     "type": "CLIP",
+     "links": [
+      2,
+      4
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "CLIPLoader"
+   },
+   "widgets_values": [
+    "minimax_h3_qwen3_vl.safetensors",
+    "minimax",
+    "default"
+   ]
+  },
+  {
+   "id": 5,
+   "type": "VAELoader",
+   "pos": [
+    40,
+    800
+   ],
+   "size": [
+    360,
+    70
+   ],
+   "flags": {},
+   "order": 4,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "VAE",
+     "type": "VAE",
+     "links": [
+      3,
+      5,
+      13
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "VAELoader"
+   },
+   "widgets_values": [
+    "minimax_h3_video_vae_fp16.safetensors"
+   ]
+  },
+  {
+   "id": 6,
+   "type": "VAELoader",
+   "pos": [
+    40,
+    910
+   ],
+   "size": [
+    360,
+    70
+   ],
+   "flags": {},
+   "order": 5,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "VAE",
+     "type": "VAE",
+     "links": [
+      15
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "VAELoader"
+   },
+   "widgets_values": [
+    "minimax_h3_audio_vae.safetensors"
+   ],
+   "title": "VAELoader (audio)"
+  },
+  {
+   "id": 7,
+   "type": "MiniMaxH3RefModsLoader",
+   "pos": [
+    40,
+    1030
+   ],
+   "size": [
+    360,
+    760
+   ],
+   "flags": {},
+   "order": 6,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "mods",
+     "type": "H3_REF_MODS",
+     "links": [
+      7
+     ],
+     "slot_index": 0
+    },
+    {
+     "name": "prompt_hint",
+     "type": "STRING",
+     "links": [],
+     "slot_index": 1
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "MiniMaxH3RefModsLoader"
+   },
+   "widgets_values": [
+    true,
+    "vanellope_example",
+    1.0,
+    1,
+    "(none)",
+    1.0,
+    1,
+    "(none)",
+    1.0,
+    1,
+    "(none)",
+    1.0,
+    1,
+    "(none)",
+    1.0,
+    1,
+    "(none)",
+    1.0,
+    1,
+    "(none)",
+    1.0,
+    1,
+    "(none)",
+    1.0,
+    1,
+    0,
+    "All",
+    1.0,
+    1.0,
+    "All",
+    1.0,
+    1.0,
+    "All",
+    1.0,
+    1.0,
+    "All",
+    1.0,
+    1.0,
+    "All",
+    1.0,
+    1.0,
+    "All",
+    1.0,
+    1.0,
+    "All",
+    1.0,
+    1.0,
+    "All",
+    1.0,
+    1.0
+   ]
+  },
+  {
+   "id": 8,
+   "type": "MiniMaxH3ImageToVideo",
+   "pos": [
+    450,
+    640
+   ],
+   "size": [
+    420,
+    330
+   ],
+   "flags": {},
+   "order": 7,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "clip",
+     "type": "CLIP",
+     "link": 2
+    },
+    {
+     "name": "vae",
+     "type": "VAE",
+     "link": 3
+    },
+    {
+     "name": "first_frame",
+     "type": "IMAGE",
+     "link": null
+    },
+    {
+     "name": "last_frame",
+     "type": "IMAGE",
+     "link": null
+    }
+   ],
+   "outputs": [
+    {
+     "name": "positive",
+     "type": "CONDITIONING",
+     "links": [
+      6
+     ],
+     "slot_index": 0
+    },
+    {
+     "name": "LATENT",
+     "type": "LATENT",
+     "links": [
+      11
+     ],
+     "slot_index": 1
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "MiniMaxH3ImageToVideo"
+   },
+   "widgets_values": [
+    "A cinematic shot of the reference subject, natural motion, soft daylight, shallow depth of field.",
+    1344,
+    768,
+    124
+   ],
+   "title": "MiniMax H3 Image to Video (positive)"
+  },
+  {
+   "id": 9,
+   "type": "MiniMaxH3ImageToVideo",
+   "pos": [
+    450,
+    1010
+   ],
+   "size": [
+    420,
+    330
+   ],
+   "flags": {},
+   "order": 8,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "clip",
+     "type": "CLIP",
+     "link": 4
+    },
+    {
+     "name": "vae",
+     "type": "VAE",
+     "link": 5
+    },
+    {
+     "name": "first_frame",
+     "type": "IMAGE",
+     "link": null
+    },
+    {
+     "name": "last_frame",
+     "type": "IMAGE",
+     "link": null
+    }
+   ],
+   "outputs": [
+    {
+     "name": "positive",
+     "type": "CONDITIONING",
+     "links": [
+      10
+     ],
+     "slot_index": 0
+    },
+    {
+     "name": "LATENT",
+     "type": "LATENT",
+     "links": [],
+     "slot_index": 1
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "MiniMaxH3ImageToVideo"
+   },
+   "widgets_values": [
+    "blurry, distorted anatomy, extra limbs, watermark, text",
+    1344,
+    768,
+    124
+   ],
+   "title": "MiniMax H3 Image to Video (negative)"
+  },
+  {
+   "id": 10,
+   "type": "MiniMaxH3RefModApply",
+   "pos": [
+    920,
+    640
+   ],
+   "size": [
+    400,
+    430
+   ],
+   "flags": {},
+   "order": 9,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "conditioning",
+     "type": "CONDITIONING",
+     "link": 6
+    },
+    {
+     "name": "mods",
+     "type": "H3_REF_MODS",
+     "link": 7
+    }
+   ],
+   "outputs": [
+    {
+     "name": "conditioning",
+     "type": "COMFY_MATCHTYPE_V3",
+     "links": [
+      9
+     ],
+     "slot_index": 0
+    },
+    {
+     "name": "curve graph",
+     "type": "IMAGE",
+     "links": [],
+     "slot_index": 1
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "MiniMaxH3RefModApply"
+   },
+   "widgets_values": [
+    false,
+    1.0,
+    "constant",
+    -1,
+    "fixed",
+    "linear",
+    1.0,
+    "(none)",
+    "shuffle",
+    1,
+    0,
+    ""
+   ]
+  },
+  {
+   "id": 11,
+   "type": "KSampler",
+   "pos": [
+    1370,
+    640
+   ],
+   "size": [
+    330,
+    430
+   ],
+   "flags": {},
+   "order": 10,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "model",
+     "type": "MODEL",
+     "link": 8
+    },
+    {
+     "name": "positive",
+     "type": "COMFY_MATCHTYPE_V3",
+     "link": 9
+    },
+    {
+     "name": "negative",
+     "type": "CONDITIONING",
+     "link": 10
+    },
+    {
+     "name": "latent_image",
+     "type": "LATENT",
+     "link": 11
+    }
+   ],
+   "outputs": [
+    {
+     "name": "LATENT",
+     "type": "LATENT",
+     "links": [
+      12,
+      14
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "KSampler"
+   },
+   "widgets_values": [
+    0,
+    "fixed",
+    30,
+    3.5,
+    "euler",
+    "simple",
+    1.0
+   ]
+  },
+  {
+   "id": 12,
+   "type": "VAEDecode",
+   "pos": [
+    1750,
+    640
+   ],
+   "size": [
+    230,
+    70
+   ],
+   "flags": {},
+   "order": 11,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "samples",
+     "type": "LATENT",
+     "link": 12
+    },
+    {
+     "name": "vae",
+     "type": "VAE",
+     "link": 13
+    }
+   ],
+   "outputs": [
+    {
+     "name": "IMAGE",
+     "type": "IMAGE",
+     "links": [
+      16
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "VAEDecode"
+   },
+   "widgets_values": []
+  },
+  {
+   "id": 13,
+   "type": "VAEDecodeAudio",
+   "pos": [
+    1750,
+    760
+   ],
+   "size": [
+    230,
+    70
+   ],
+   "flags": {},
+   "order": 12,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "samples",
+     "type": "LATENT",
+     "link": 14
+    },
+    {
+     "name": "vae",
+     "type": "VAE",
+     "link": 15
+    }
+   ],
+   "outputs": [
+    {
+     "name": "AUDIO",
+     "type": "AUDIO",
+     "links": [
+      17
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "VAEDecodeAudio"
+   },
+   "widgets_values": []
+  },
+  {
+   "id": 14,
+   "type": "CreateVideo",
+   "pos": [
+    2030,
+    640
+   ],
+   "size": [
+    260,
+    170
+   ],
+   "flags": {},
+   "order": 13,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "link": 16
+    },
+    {
+     "name": "audio",
+     "type": "AUDIO",
+     "link": 17
+    }
+   ],
+   "outputs": [
+    {
+     "name": "VIDEO",
+     "type": "VIDEO",
+     "links": [
+      18
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "CreateVideo"
+   },
+   "widgets_values": [
+    24.0,
+    "auto",
+    "sRGB",
+    "none"
+   ]
+  },
+  {
+   "id": 15,
+   "type": "SaveVideo",
+   "pos": [
+    2340,
+    640
+   ],
+   "size": [
+    300,
+    130
+   ],
+   "flags": {},
+   "order": 14,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "video",
+     "type": "VIDEO",
+     "link": 18
+    }
+   ],
+   "outputs": [
+    {
+     "name": "video",
+     "type": "VIDEO",
+     "links": [],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "SaveVideo"
+   },
+   "widgets_values": [
+    "video/h3_refmod",
+    "auto"
+   ]
+  }
+ ],
+ "links": [
+  [
+   1,
+   2,
+   0,
+   3,
+   0,
+   "MODEL"
+  ],
+  [
+   2,
+   4,
+   0,
+   8,
+   0,
+   "CLIP"
+  ],
+  [
+   3,
+   5,
+   0,
+   8,
+   1,
+   "VAE"
+  ],
+  [
+   4,
+   4,
+   0,
+   9,
+   0,
+   "CLIP"
+  ],
+  [
+   5,
+   5,
+   0,
+   9,
+   1,
+   "VAE"
+  ],
+  [
+   6,
+   8,
+   0,
+   10,
+   0,
+   "CONDITIONING"
+  ],
+  [
+   7,
+   7,
+   0,
+   10,
+   1,
+   "H3_REF_MODS"
+  ],
+  [
+   8,
+   3,
+   0,
+   11,
+   0,
+   "MODEL"
+  ],
+  [
+   9,
+   10,
+   0,
+   11,
+   6,
+   "COMFY_MATCHTYPE_V3"
+  ],
+  [
+   10,
+   9,
+   0,
+   11,
+   7,
+   "CONDITIONING"
+  ],
+  [
+   11,
+   8,
+   1,
+   11,
+   8,
+   "LATENT"
+  ],
+  [
+   12,
+   11,
+   0,
+   12,
+   0,
+   "LATENT"
+  ],
+  [
+   13,
+   5,
+   0,
+   12,
+   1,
+   "VAE"
+  ],
+  [
+   14,
+   11,
+   0,
+   13,
+   0,
+   "LATENT"
+  ],
+  [
+   15,
+   6,
+   0,
+   13,
+   1,
+   "VAE"
+  ],
+  [
+   16,
+   12,
+   0,
+   14,
+   0,
+   "IMAGE"
+  ],
+  [
+   17,
+   13,
+   0,
+   14,
+   2,
+   "AUDIO"
+  ],
+  [
+   18,
+   14,
+   0,
+   15,
+   0,
+   "VIDEO"
+  ]
+ ],
+ "groups": [],
+ "config": {},
+ "extra": {
+  "ds": {
+   "scale": 0.6,
+   "offset": [
+    0,
+    0
+   ]
+  },
+  "workflow_info": {
+   "name": "H3 RefMod identity video",
+   "description": "Generate a video with a RefMod injected into the H3 conditioning.",
+   "requires": [
+    "MiniMax-H3 video DiT",
+    "MiniMax-H3 CLIP",
+    "MiniMax-H3 video VAE",
+    "MiniMax-H3 audio VAE (optional)"
+   ]
+  }
+ },
+ "version": 0.4
+}

@@ -43,6 +43,7 @@ PY_SUITES = [
     "tests/test_audio_resample.py",
     "tests/test_core_refmod.py",
     "tests/test_refmod_pipeline.py",
+    "tests/test_example_workflows.py",
     "compatibility_regression_test.py",
     "issue_regression_test.py",
 ]

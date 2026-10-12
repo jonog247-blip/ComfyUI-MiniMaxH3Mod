@@ -24,6 +24,10 @@
 - **Clearer failures** — an odd latent grid, a NaN latent, a mismatched frame
   count or a sub-100 KB output now says what is wrong instead of degrading
   silently three nodes later.
+- **Loadable test workflows** — [`examples/workflows/`](#test-workflows) ships a
+  VAE-only smoke test (folder → mod → decoded preview, no 29B model needed) and
+  a full identity-generation graph, both checked against the live node schemas
+  and ComfyUI's own prompt validator on every test run.
 
 ## What's new — v0.2.6
 
@@ -128,6 +132,43 @@ A ready-made example mod ships in the repo: **`mods/vanellope_example.safetensor
 It appears as `vanellope_example` in the `Load H3 RefMods` dropdown after
 install — plug it into `Apply H3 RefMod` at strength 1.0 and prompt for
 a candy racer in a karting scene.
+
+### Test workflows
+
+Two loadable graphs ship in **`examples/workflows/`** — drag either one onto
+the ComfyUI canvas (or use *Load* from the workflow menu). Each carries a Note
+with the same instructions.
+
+| File | Needs | What it proves |
+| --- | --- | --- |
+| `refmod_smoke_test.json` | the H3 video VAE only — **no 29B DiT, no CLIP** | extraction works end to end: a folder of images → `models/refmods/smoke_test_identity.safetensors` → loaded back and decoded to a preview image |
+| `refmod_identity_video.json` | H3 DiT + CLIP + video VAE (+ audio VAE for sound) | the RefMod is injected into real generation: prompt → Apply → sampler → video file |
+
+Run the smoke test first; it needs about 1 GB of model and a few minutes on a
+GPU. Put 3-8 images of one subject in `ComfyUI/input/refmod_test/` (or point
+the Folder widget at any absolute path), check the VAELoader points at your H3
+video VAE, and queue. Expect a console block like:
+
+```text
+{
+  "name": "smoke_test_identity",
+  "kind": "video",
+  "latent_frames": 4,
+  "tokens": 2816,
+  "source_shape": "1x64x44 +1x64x44 +1x64x44 +1x64x44",
+  "saved_paths": [".../models/refmods/smoke_test_identity.safetensors"]
+}
+```
+
+and a preview image that resembles your subject. A saved file under ~100 KB
+means the encode failed. The generation workflow's three model loaders hold
+placeholder file names — pick your own, and note that its sampler settings are
+a starting point rather than tuned values.
+
+Both graphs are checked by `tests/test_example_workflows.py` (run by
+`python tests/run_all.py`): node types, widget order, link slots and a pass
+through ComfyUI's own `validate_prompt`, so a renamed node input breaks the
+test suite rather than a user's canvas.
 
 ## Install
 
@@ -624,10 +665,14 @@ same `retention` master control.
 1. Connect images/video frames to **Create H3 RefMod** or **Master**, with the
    standard H3 video VAE. On Master, connect AUDIO and the H3 audio VAE if wanted.
    Image slots use the first image of a batch; video slots preserve a sequence.
-2. Choose a name and optional subfolder. For a visual baseline, compare `encode`
-   against `training` using the same refs and generation settings. The visual
-   node defaults are `training`, 16×16 grid, `latent_frames=16`, `identity=500`,
-   `ref_resolution=1024`, and `max_tokens=5120`; presets can override some of them.
+2. Choose a name and optional subfolder. For a visual baseline, compare
+   Compressed Reference (`training`) against Full Reference (`encode`) using
+   the same refs and generation settings. The visual node defaults are
+   Compressed Reference, a 16×16 grid, `concept_type=generic`,
+   `latent_frames=16`, `identity=500`, `ref_resolution=1024` and
+   `max_tokens=5120`; presets can override some of them. The standalone CLIs
+   default the other way — encode mode, `identity`, an 8192 token budget —
+   because that is what the RefMod creation guide documents.
 3. Connect the output bundle directly to **Apply H3 RefMod**, or load the saved
    file(s) with **Load H3 RefMods**. Connect your H3 conditioning to Apply and
    its result to the sampler's matching conditioning input.
@@ -968,8 +1013,15 @@ fixes are not a claim of improved identity, motion or voice quality.
 
 Run every check with `python tests/run_all.py` (set `COMFYUI_ROOT` if the pack
 is not inside a ComfyUI install). It runs the loader/queue-validation, audio,
-core-helper, extraction-pipeline, CPU/MPS and issue-regression suites plus the
-frontend slot check, and exits non-zero on any failure — usable as a CI step.
+core-helper, extraction-pipeline, example-workflow, CPU/MPS and
+issue-regression suites plus the frontend slot check, and exits non-zero on any
+failure — usable as a CI step.
+
+The example-workflow suite validates every JSON in `examples/workflows/`
+against the live node schemas — node types, widget order and count, link slots
+and types — and then pushes each converted graph through ComfyUI's own
+`execution.validate_prompt`, the same validator the queue uses. Placeholder
+model names stand in for the checkpoints, so it needs no weights and no GPU.
 
 The extraction-pipeline suite runs `scripts/generate_refmod.py` and
 `extract_mod.py` end to end against a stub VAE that follows `comfy.sd.VAE`'s

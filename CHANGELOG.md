@@ -30,7 +30,14 @@ rely on.
 - Reject invalid stored latents at load time with a specific error: non-even latent grids (H3 patches 2x2 cells, so an odd edge silently drops a row), NaN/Inf latents, `kind="image"` with several frames, and wrong tensor rank.
 - Add `--frame-selection diverse` (default in both CLIs) for when the token cap forces a cut on a stack of stills: greedy k-center keeps the most distinct views instead of whatever sits at even positions. `uniform` remains available and is still what the node does, so saved workflows are unchanged.
 - Reconcile the release metadata: `__init__.py` and `pyproject.toml` both report 0.2.8.
-- Track `tests/` in git and add `tests/run_all.py`, so a clean clone can reproduce the checks: 79 python tests across six suites plus the frontend slot test.
+- Track `tests/` in git and add `tests/run_all.py`, so a clean clone can reproduce the checks: 88 python tests across seven suites plus the frontend slot test.
+
+### Example workflows
+
+- Add `examples/workflows/refmod_smoke_test.json`: folder loader -> Create H3 RefMod (Full Reference, identity, 1024px, 8192 tokens) -> Inspect -> PreviewImage. It needs the H3 video VAE and nothing else, so a fresh install can confirm extraction, saving, loading and decoding without the 29B DiT or the CLIP.
+- Add `examples/workflows/refmod_identity_video.json`: UNETLoader -> Sigma Shift -> Image to Video -> Apply H3 RefMod -> KSampler -> VAE Decode (+ audio) -> Create Video -> Save Video, with the shipped `vanellope_example` mod in the loader slot.
+- Add `tests/test_example_workflows.py`, which loads both files and checks them against the live node schemas — node types exist, socket names are real inputs, widget values line up positionally with the schema's widget list, every link resolves at both ends with a compatible type, and each graph reaches an output node — then converts each graph to the API prompt format and runs it through ComfyUI's own `execution.validate_prompt`. Placeholder model names keep it weight-free and GPU-free. Verified against ComfyUI 0.39.0; the smoke graph was also executed for real end to end (folder of stills -> 2816-token mod on disk -> decoded preview).
+- Correct the stale node-default list in the README's minimal-workflow steps (the visual node defaults to Compressed Reference and `generic`, and the CLIs default the other way round because that is what the creation guide documents).
 
 ## v0.2.7 (unreleased work folded into 0.2.8)
 
