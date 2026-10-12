@@ -5,6 +5,26 @@
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/C0C2EV9GW)
 
+## What's new — v0.2.8
+
+- **Whole-folder extraction** — [`scripts/generate_refmod.py`](#whole-dataset-folder-scriptsgenerate_refmodpy)
+  is the one-command path from the RefMod creation guide: point it at a dataset
+  folder and it writes `models/refmods/minimaxh3_<dataset>_v1_refmod.safetensors`.
+  `--dry-run` previews the canvas, per-frame token cost and estimated file size
+  without loading the VAE; `--each-subfolder` does a whole library in one pass
+  with the VAE loaded once.
+- **Faster extraction on CUDA** — TF32 + cuDNN autotuning scoped to the encode,
+  the encode output kept on the GPU, same-shape stills encoded as one batch,
+  GPU-side resizing and an early-exit refinement. Each has an escape hatch, and
+  the global torch settings are restored afterwards.
+  See [Speed on a CUDA GPU](#speed-on-a-cuda-gpu).
+- **Guide-consistent defaults and names** — the CLI defaults to `encode` mode
+  and the documented 8192-token budget, and concept types accept the documented
+  spellings (`general` -> `generic`, `character` -> `identity`, ...).
+- **Clearer failures** — an odd latent grid, a NaN latent, a mismatched frame
+  count or a sub-100 KB output now says what is wrong instead of degrading
+  silently three nodes later.
+
 ## What's new — v0.2.6
 
 - **Standalone creators** — Create H3 RefMod and Master now run without a
@@ -818,8 +838,53 @@ not as guaranteed separation of motion from identity or background.
 
 ## Standalone extraction (visual only)
 
-Use the Python environment that runs ComfyUI. Both commands set their mode
-explicitly; the CLI default is `training`.
+Use the Python environment that runs ComfyUI. Two entry points share the same
+extraction pipeline; both default to `encode` mode and an 8192-token budget.
+
+### Whole dataset folder: `scripts/generate_refmod.py`
+
+Scans a folder, works out the canvas/aspect, allocates the token budget and
+writes `ComfyUI/models/refmods/minimaxh3_<dataset>_v1_refmod.safetensors`.
+
+```bash
+# ComfyUI Easy-Install / Portable (Windows), from the ComfyUI root
+python_embeded\python.exe scripts\generate_refmod.py "E:\Datasets\GabrielleAplin"
+
+# standard venv install
+python scripts/generate_refmod.py /data/datasets/GabrielleAplin
+
+# see what would be encoded (files, canvas, tokens, estimated size) — no VAE load
+python scripts/generate_refmod.py /data/datasets/GabrielleAplin --dry-run
+
+# custom name, style concept, tighter budget
+python scripts/generate_refmod.py /data/datasets/GradeA \
+    --name minimaxh3_grade_a_refmod --concept-type style --max-tokens 4096
+
+# bulk: one mod per subfolder, VAE loaded once; existing outputs are skipped
+python scripts/generate_refmod.py /data/datasets --each-subfolder
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--comfy-dir <path>` | auto-detected | ComfyUI root (found by walking up from the script) |
+| `--name <string>` | `minimaxh3_<folder>_v1_refmod` | output name |
+| `--resolution <int>` | `1024` | short-edge cap, snapped to a multiple of 32 |
+| `--max-tokens <int>` | `8192` | reference token budget |
+| `--concept-type <type>` | `identity` | `identity`, `style`, `general` (and other aliases) |
+| `--dry-run` | off | preview the plan without encoding |
+| `--recursive`, `--no-videos`, `--each-subfolder`, `--overwrite` | off | dataset scanning |
+| `--vae`, `--output`, `--mode`, `--encode-batch`, `--frame-selection`, `--device` | see `--help` | shared with `extract_mod.py` |
+
+The script lives in the pack. Copy or symlink it to `ComfyUI/scripts/` and the
+commands in the RefMod creation guide work verbatim; running it from this
+folder works too, because it locates its ComfyUI root itself.
+
+It also enforces the guide's sanity checks: 8-20 images recommended for an
+identity dataset, a warning when two files are the same shot, and a warning
+when the written file is under 100 KB (which means the encode produced nothing
+usable — a healthy 8 x 1024px identity mod is ~1.5 MB / 8192 tokens).
+
+### Individual files: `extract_mod.py`
 
 ```bash
 # Store the VAE encode as an identity comparison baseline
@@ -833,10 +898,45 @@ python custom_nodes/ComfyUI-MiniMaxH3Mod/extract_mod.py \
     --name dance --mode training --pool 16 --latent-frames 16 --identity 500
 ```
 
-Other options include `--pool-w`, `--max-tokens`, `--multiplier`, `--subfolder`,
-`--output`, `--max-edge`, `--max-frames`, `--description`, `--concept-type` and
-`--device`. Run `--help` for defaults. Video decode uses OpenCV or imageio.
-Files use embedded metadata; legacy JSON sidecars remain supported.
+Other options include `--pool-w`, `--max-tokens`, `--frame-selection`,
+`--refine-tol`, `--multiplier`, `--subfolder`, `--output`, `--comfy-dir`,
+`--max-edge`, `--max-frames`, `--description`, `--concept-type`,
+`--encode-batch`, `--resize-on-gpu` and `--device`. Run `--help` for defaults.
+Video decode uses OpenCV or imageio. Files use embedded metadata; legacy JSON
+sidecars remain supported.
+
+`--concept-type` accepts the canonical names plus documented aliases, stored
+canonically: `general` -> `generic`, `character`/`person`/`face` -> `identity`,
+`pose`/`motion` -> `pose_motion`, `outfit` -> `clothing`, `sfx` -> `sound_fx`.
+An unrecognized label is rejected by the CLI and preserved verbatim when read
+back from a mod, so custom vocabularies survive.
+
+### Speed on a CUDA GPU
+
+Extraction is dominated by the VAE encode, so that is what gets optimized:
+
+| Change | Effect | Escape hatch |
+|---|---|---|
+| TF32 + cuDNN autotuning, scoped to the encode | tensor-core convs for the fp32 VAE pass | `REFMOD_TF32=0`, `REFMOD_CUDNN_BENCHMARK=0` |
+| Encode output stays on the GPU | no full-res latent PCIe round trip; fp16 halves what is copied out | `REFMOD_VAE_GPU_IO=0` |
+| Same-shape stills encoded as one batch | N tile passes become one; the main lever after resolution | `--encode-batch 1` |
+| Stills resized on the GPU | lanczos of a large source is faster than the extra upload | `--resize-on-gpu never` |
+| Refinement early exit | stops when the loss is flat instead of running all `--identity` steps | `--refine-tol 0` |
+| Fused Adam in the refinement loop | one kernel per step instead of several | automatic fallback |
+
+Both settings that touch global torch state are restored afterwards, so a
+custom node never changes the numerics of the rest of your ComfyUI process.
+
+Batching is guarded, because it rides a less-travelled path: only pre-aligned
+refs are batched, the first batch is compared against a single encode of the
+same still, the batch size is capped by the VAE's own free-memory estimate, and
+any disagreement or failure falls back to per-image encodes for that VAE. The
+node uses the same helper for plain `encode`-mode stills; masked, `motion_only`,
+video and `training`-mode refs keep their per-reference path.
+
+At generation time the Step Curve node now memoizes each reference's blurred
+copy for the whole sampling run instead of recomputing it per step and per CFG
+branch (the mix itself is unchanged).
 
 ## Validation and experimental training status
 
@@ -866,10 +966,18 @@ fixes are not a claim of improved identity, motion or voice quality.
 
 ### Other validation
 
-Run production regressions with `python -m unittest discover -s tests -v`.
-The suite covers loaders/queue validation, storage, caches, curves, bridge,
-Master orchestration and audio storage. Codec checks used a real audio VAE;
-these are not full H3 voice/visual quality evaluations.
+Run every check with `python tests/run_all.py` (set `COMFYUI_ROOT` if the pack
+is not inside a ComfyUI install). It runs the loader/queue-validation, audio,
+core-helper, extraction-pipeline, CPU/MPS and issue-regression suites plus the
+frontend slot check, and exits non-zero on any failure — usable as a CI step.
+
+The extraction-pipeline suite runs `scripts/generate_refmod.py` and
+`extract_mod.py` end to end against a stub VAE that follows `comfy.sd.VAE`'s
+MiniMax-H3 contract: folder discovery, name derivation, canvas/aspect, batched
+encode (including the fallback when a VAE rejects a batch dimension), the
+8192-token budget, the written safetensors and the guide's ~1.1-1.6 MB size
+expectation. It verifies behavior, not quality — no checkpoint and no GPU are
+involved, and no H3 voice/visual quality claim comes out of it.
 
 `gauntlet_harness.py` compares three implementations of the existing model-free
 MSE refinement. `tests/h3_gradient_probe.py` is a separate gradient-feasibility

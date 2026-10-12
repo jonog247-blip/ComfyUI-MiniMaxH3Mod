@@ -5,7 +5,34 @@ All notable changes are tracked here. Each version is also published as a
 so you can keep using an older version if a new one changes something you
 rely on.
 
-## Unreleased
+## v0.2.8 — 2026-10-12
+
+### Guide compliance
+
+- Add `scripts/generate_refmod.py`, the whole-folder extractor the creation guide documents as Method 1: folder scanning (with `--recursive`, mask/caption folder exclusion), `--dry-run` plan (canvas, tokens per frame, budget, estimated size), `--each-subfolder` bulk mode that loads the VAE once (the guide's Method 3), `--overwrite`, guide-conventional `minimaxh3_<dataset>_v1_refmod` naming, and the guide's CLI surface (`--comfy-dir`, `--name`, `--resolution`, `--max-tokens`, `--concept-type`, `--dry-run`). It locates its ComfyUI root itself, so it runs from the pack or from a copy in `ComfyUI/scripts/`.
+- Accept the documented concept-type spellings everywhere (`general` -> `generic`, `character`/`person`/`face` -> `identity`, `pose` -> `pose_motion`, `outfit` -> `clothing`, `sfx` -> `sound_fx`, ...) and store them canonically. Mods that carry an unrecognized label keep it verbatim, so custom vocabularies survive a round trip.
+- `extract_mod.py` now defaults to `--mode encode` (its own docstring and the guide already described encode as the default; the flag said `training`) and to `--max-tokens 8192`, the budget the guide documents. 5120 silently trimmed the guide's own 8-image example.
+- `--output` resolves a relative path against `--comfy-dir` when it exists there, so the guide's `--output models\refmods` writes to the same place from any working directory.
+- Add the guide's sanity checks to both CLIs: 8-20 images recommended for an identity dataset, a warning when two source files are the same shot, and a warning when the written mod is under 100 KB (a healthy 8 x 1024px identity mod is ~1.5 MB / 8192 tokens).
+- Fix `issue_regression_test.py`, which could not be run as documented: the script directory shadowed ComfyUI's `nodes` module and every relative import in the pack failed. All 10 of its regressions run again.
+
+### CUDA extraction speed
+
+- Batch same-shape still references into one VAE call (`--encode-batch`, default 4) instead of one call each. Guarded: pre-aligned refs only, the first batch is verified against a single encode, the batch is sized by the VAE's own free-memory estimate, and any disagreement falls back to per-image encodes for that VAE. The Extract node uses the same helper for plain `encode`-mode stills; masked, `motion_only`, video and `training` refs keep their per-reference path.
+- Scope TF32 + cuDNN autotuning to the encode (`REFMOD_TF32=0` / `REFMOD_CUDNN_BENCHMARK=0` to keep the old numerics) and restore both afterwards, so the pack never changes the numerics of the rest of the process.
+- Keep the encode output on the GPU (`REFMOD_VAE_GPU_IO=0` to opt out) so a full-res latent is not copied to the CPU and back for refinement, and so the fp16 store copies half the bytes.
+- Resize stills on the encode device when it is a GPU (`--resize-on-gpu never` to opt out).
+- Stop the gradient refinement early once the loss is flat (`--refine-tol`, default 1e-4 in the CLIs; 0 keeps the old behavior) and use CUDA's fused Adam in both refinement loops.
+- Memoize each reference's blurred latent for a sampling run in the Step Curve wrapper instead of recomputing it per denoising step and per CFG branch. Bounded LRU, cleared when a new wrapper is built; MPS benefits most because that blur round-trips through the CPU.
+
+### Robustness and quality
+
+- Reject invalid stored latents at load time with a specific error: non-even latent grids (H3 patches 2x2 cells, so an odd edge silently drops a row), NaN/Inf latents, `kind="image"` with several frames, and wrong tensor rank.
+- Add `--frame-selection diverse` (default in both CLIs) for when the token cap forces a cut on a stack of stills: greedy k-center keeps the most distinct views instead of whatever sits at even positions. `uniform` remains available and is still what the node does, so saved workflows are unchanged.
+- Reconcile the release metadata: `__init__.py` and `pyproject.toml` both report 0.2.8.
+- Track `tests/` in git and add `tests/run_all.py`, so a clean clone can reproduce the checks: 79 python tests across six suites plus the frontend slot test.
+
+## v0.2.7 (unreleased work folded into 0.2.8)
 
 - Correct visual reference sampling to H3's 17k+5 video grid in the node and CLI. Preserve all frames of aligned clips and both endpoints when uniformly sampling; references/caps below five frames use the first image.
 - Support MPS-resident RefMod latents without global CPU fallback: pool and blur explicitly on CPU, preserving return device, dtype and autograd. Synchronize MPS in the refinement timing harness.

@@ -56,6 +56,8 @@ from .prompt import MiniMaxH3RefModTextEncode, reference_map
 from .bundle import load_bundle, save_bundle, members as bundle_members
 
 from .common import (
+    cuda_fast_math,
+    encode_ref_stills,
     list_media_files,
     load_image_file,
     load_video_file,
@@ -64,6 +66,7 @@ from .common import (
     resize_ref as _resize_ref,
     sample_video_for_vae as _sample_video_for_vae,
     ensure_min_size as _ensure_min_size,
+    vae_output_on,
 )
 from . import continuum_bridge
 from .audio import make_audio_mod
@@ -74,9 +77,12 @@ from .core import (
     H3RefMod,
     _blur_latent,
     aspect_grid,
+    blur_latent_cached,
+    clear_blur_cache,
     curve_strengths,
     curve_value_at,
     fit_token_budget,
+    normalize_concept_type,
     normalize_mode,
     optimize_latent,
     optimize_latent_multi,
@@ -148,7 +154,6 @@ def _mod_search_dirs() -> List[str]:
         if d not in dirs and os.path.isdir(d):
             dirs.append(d)
     return dirs
-
 
 
 def _list_mod_names() -> List[str]:
@@ -315,7 +320,6 @@ def _check_loader_numbers(required, kwargs):
             error = _number_error(field, kwargs[field], kind, options)
             if error:
                 raise ValueError(error)
-
 
 
 def _validate_mod_inputs(required, input_types, kwargs):
@@ -666,6 +670,10 @@ _STEP_WRAPPER_SEQ = itertools.count()
 
 def _make_step_wrapper(spec, progress=None) -> Callable:
     """Mix only marked refs in this forward; never retain or mutate a payload."""
+    # one wrapper == one sampling run: drop the previous run's blurred latents
+    # so a long-lived server doesn't keep them pinned
+    clear_blur_cache()
+
     def wrapper(executor, x, timestep, context, transformer_options, **kwargs):
         payload = kwargs.get("minimax_payload")
         if not payload or not any(r.get("refmod") for r in payload.get("refs", [])):
@@ -690,13 +698,12 @@ def _make_step_wrapper(spec, progress=None) -> Callable:
                     raise ValueError("RefMod Step Curve: reference layout does not match conditioning latents.")
                 if ref.get("refmod"):
                     z = out[index]
-                    out[index] = strength * z + (1.0 - strength) * _blur_latent(z)
+                    out[index] = strength * z + (1.0 - strength) * blur_latent_cached(z)
                 index += 1
             mixed[field] = out
         return executor(x, timestep, context, transformer_options,
                         **dict(kwargs, minimax_payload=mixed))
     return wrapper
-
 
 
 def _prompt_hint(loads) -> str:
@@ -1545,6 +1552,56 @@ class MiniMaxH3RefModMaskList:
         return (items,)
 
 
+# How many same-canvas stills go through one VAE call. Each still is far too
+# small to fill a GPU on its own (the H3 VAE tiles internally at 256px), so
+# batching is the main extraction speed lever after resolution.
+EXTRACT_ENCODE_BATCH = 4
+
+
+def _preencode_stills(vae, sources, mode, masks, motion_only, ref_resolution,
+                      canvas) -> Dict[int, torch.Tensor]:
+    """Encode the plain still refs of an encode-mode run in batched VAE calls.
+
+    Returns ``{reference index: latent}`` for the refs handled here; every
+    other reference (videos, masked refs, motion_only, training mode) keeps the
+    per-ref path in the Extract loop. Only engaged on CUDA — on a CPU the batch
+    would cost activation memory without saving anything — and only when at
+    least two refs qualify, since a batch of one is the old path.
+
+    ``encode_ref_stills`` verifies the batched result against a single encode
+    the first time and falls back per reference, so a VAE that can't take a
+    batch dimension costs one wasted call instead of a corrupt mod.
+    """
+    if mode != "encode" or masks is not None or motion_only:
+        return {}
+    device = getattr(vae, "device", None)
+    if device is None or torch.device(device).type != "cuda":
+        return {}
+    eligible = [i for i, (src, is_video) in enumerate(sources)
+                if not is_video and src.shape[0] == 1]
+    if len(eligible) < 2:
+        return {}
+    batch = min(EXTRACT_ENCODE_BATCH, len(eligible))
+    out: Dict[int, torch.Tensor] = {}
+    with cuda_fast_math(), vae_output_on(vae, device), torch.no_grad():
+        for start in range(0, len(eligible), batch):
+            chunk = eligible[start:start + batch]
+            prepared = [_ensure_min_size(_resize_ref(sources[i][0], ref_resolution, canvas))
+                        for i in chunk]
+            for index, latent in zip(chunk, encode_ref_stills(
+                    vae, prepared, device=device, max_batch=batch)):
+                if latent.dim() != 5 or latent.shape[1] != 24:
+                    # not the H3 VAE: hand everything back so the Extract loop
+                    # raises its own, more specific error on the first ref
+                    return {}
+                out[index] = latent
+            del prepared
+    if out:
+        print(f"[MiniMaxH3RefModExtract] encoded {len(out)} still ref(s) in "
+              f"batched VAE calls (up to {batch} per call)")
+    return out
+
+
 class MiniMaxH3RefModExtract(io.ComfyNode):
     """
     Turn one or more references of the same concept into a RefMod.
@@ -1755,6 +1812,10 @@ class MiniMaxH3RefModExtract(io.ComfyNode):
         if budget_policy not in ("truncate", "error"):
             raise ValueError("Unknown visual token budget policy.")
         name = _sanitize_name(name)
+        # a connected concept_type can carry one of the documented aliases
+        # ("general" -> generic, "character" -> identity, ...); keep the stored
+        # metadata canonical. An unrecognized label is left alone.
+        concept_type = normalize_concept_type(concept_type) or concept_type
         # old pre-Autogrow workflows pass their widget values through as kwargs:
         # map them onto the new inputs so those saved workflows keep running.
         # ``pool`` is the old height; ``pool_w`` arrives as the named param.
@@ -1896,67 +1957,79 @@ class MiniMaxH3RefModExtract(io.ComfyNode):
         # refine one shared latent against all of them jointly after the loop
         merge_refs = [] if (merge and mode == "training" and n_refs > 1) else None
         pbar = comfy.utils.ProgressBar(n_refs)
+        # plain still refs of an encode-mode run share one canvas, so they go
+        # through the VAE in batches instead of one call each (see
+        # _preencode_stills); everything else keeps the per-ref path below
+        preencoded = _preencode_stills(
+            vae, sources, mode, masks, motion_only, ref_resolution, canvas)
         for src_idx in range(len(sources)):
             src, is_video = sources[src_idx]
             label = f"ref {src_idx + 1}/{n_refs} ({'video' if is_video else 'image'})"
             print(f"[MiniMaxH3RefModExtract] {label}: "
                   f"source {tuple(src.shape)}, mode={mode}"
                   + (f", identity={identity} steps" if mode == "training" and identity > 0 else ""))
-            if mode == "encode":
-                # downscale (never upscale) to the target short edge, sample
-                # videos to latent_frames frames, then encode at full res
-                if is_video:
-                    src = _sample_video_for_vae(src, latent_frames)
-                src = _resize_ref(src, ref_resolution, canvas)
+            if src_idx in preencoded:
+                # encoded with the other plain stills in one batched VAE call
+                z = preencoded.pop(src_idx)
+                mask_px = None
             else:
-                # training mode: encode smaller too — the latent is pooled
-                # to a tiny grid anyway, so encoding at native resolution is
-                # wasted compute. Resize preserves aspect, so the pool grid
-                # anchored on the first source's aspect still applies.
-                orig = (src.shape[1], src.shape[2])
-                src = _resize_ref(src, ref_resolution, None)
-                if (src.shape[1], src.shape[2]) != orig:
-                    print(f"[MiniMaxH3RefModExtract] {label}: resized "
-                          f"{orig[0]}x{orig[1]} -> {src.shape[1]}x{src.shape[2]} "
-                          f"(ref_resolution={ref_resolution}) before encode")
-            if motion_only and is_video and src.shape[0] > 1:
-                # temporal differences: |f[t+1] - f[t]|, normalized by the clip's
-                # peak motion so static frames stay dark ("no motion here") and
-                # moving parts light up — appearance never enters the latent
-                d = (src[1:] - src[:-1]).abs()
-                peak = d.max()
-                if peak > 1e-6:
-                    d = d / peak
-                src = d
-                motion_applied = True
-                print(f"[MiniMaxH3RefModExtract] {label}: motion_only — "
-                      f"encoded temporal differences instead of the frames "
-                      f"(static appearance stripped)")
-            elif motion_only and not is_video and not motion_warned:
-                print("[MiniMaxH3RefModExtract] warning: motion_only needs video "
-                      "refs — a still has no motion, keeping its appearance.")
-                motion_warned = True
-            src = _ensure_min_size(src)
-            if is_video and src.shape[0] > 1:
-                aligned = _sample_video_for_vae(src)
-                if aligned.shape[0] != src.shape[0]:
-                    print(f"[MiniMaxH3RefModExtract] reference {src_idx + 1} "
-                          f"(video): sampling {src.shape[0]} -> {aligned.shape[0]} frames "
-                          f"on H3's 17k+5 grid (short clips use the first image).")
-                src = aligned
-            mask_px = None
-            if masks is not None:
-                mask_px = _resize_mask(masks[src_idx], src.shape[1], src.shape[2],
-                                       "center" if mode == "encode" and canvas is not None else "disabled")
-            if src.shape[1] <= 0 or src.shape[2] <= 0:
-                raise ValueError(
-                    f"MiniMaxH3RefModExtract: reference {src_idx + 1} "
-                    f"({'video' if is_video else 'image'}) has an empty frame "
-                    f"{tuple(src.shape)} right before VAE encode (mode={mode}, "
-                    f"ref_resolution={ref_resolution}, canvas={canvas}). "
-                    f"Check that this specific reference's source image/video "
-                    f"is valid.")
-            z = vae.encode(src)
+                if mode == "encode":
+                    # downscale (never upscale) to the target short edge, sample
+                    # videos to latent_frames frames, then encode at full res
+                    if is_video:
+                        src = _sample_video_for_vae(src, latent_frames)
+                    src = _resize_ref(src, ref_resolution, canvas)
+                else:
+                    # training mode: encode smaller too — the latent is pooled
+                    # to a tiny grid anyway, so encoding at native resolution is
+                    # wasted compute. Resize preserves aspect, so the pool grid
+                    # anchored on the first source's aspect still applies.
+                    orig = (src.shape[1], src.shape[2])
+                    src = _resize_ref(src, ref_resolution, None)
+                    if (src.shape[1], src.shape[2]) != orig:
+                        print(f"[MiniMaxH3RefModExtract] {label}: resized "
+                              f"{orig[0]}x{orig[1]} -> {src.shape[1]}x{src.shape[2]} "
+                              f"(ref_resolution={ref_resolution}) before encode")
+                if motion_only and is_video and src.shape[0] > 1:
+                    # temporal differences: |f[t+1] - f[t]|, normalized by the clip's
+                    # peak motion so static frames stay dark ("no motion here") and
+                    # moving parts light up — appearance never enters the latent
+                    d = (src[1:] - src[:-1]).abs()
+                    peak = d.max()
+                    if peak > 1e-6:
+                        d = d / peak
+                    src = d
+                    motion_applied = True
+                    print(f"[MiniMaxH3RefModExtract] {label}: motion_only — "
+                          f"encoded temporal differences instead of the frames "
+                          f"(static appearance stripped)")
+                elif motion_only and not is_video and not motion_warned:
+                    print("[MiniMaxH3RefModExtract] warning: motion_only needs video "
+                          "refs — a still has no motion, keeping its appearance.")
+                    motion_warned = True
+                src = _ensure_min_size(src)
+                if is_video and src.shape[0] > 1:
+                    aligned = _sample_video_for_vae(src)
+                    if aligned.shape[0] != src.shape[0]:
+                        print(f"[MiniMaxH3RefModExtract] reference {src_idx + 1} "
+                              f"(video): sampling {src.shape[0]} -> {aligned.shape[0]} frames "
+                              f"on H3's 17k+5 grid (short clips use the first image).")
+                    src = aligned
+                mask_px = None
+                if masks is not None:
+                    mask_px = _resize_mask(masks[src_idx], src.shape[1], src.shape[2],
+                                           "center" if mode == "encode" and canvas is not None else "disabled")
+                if src.shape[1] <= 0 or src.shape[2] <= 0:
+                    raise ValueError(
+                        f"MiniMaxH3RefModExtract: reference {src_idx + 1} "
+                        f"({'video' if is_video else 'image'}) has an empty frame "
+                        f"{tuple(src.shape)} right before VAE encode (mode={mode}, "
+                        f"ref_resolution={ref_resolution}, canvas={canvas}). "
+                        f"Check that this specific reference's source image/video "
+                        f"is valid.")
+                # same GPU settings the batched path uses, scoped to this call
+                with cuda_fast_math(), vae_output_on(vae, getattr(vae, "device", None)):
+                    z = vae.encode(src)
             if z.dim() != 5 or z.shape[1] != 24:
                 raise ValueError(
                     f"Expected a MiniMax H3 video VAE latent [1,24,T,H,W], "

@@ -7,6 +7,7 @@ import contextlib
 import importlib
 import io
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -15,6 +16,11 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent
+# Run as a script, this directory lands first on sys.path and shadows
+# ComfyUI's own `nodes` module — the local nodes.py then fails on its relative
+# imports. Drop it before importing anything from the ComfyUI install.
+_here = str(ROOT)
+sys.path[:] = [p for p in sys.path if os.path.abspath(p or ".") != _here]
 sys.path.insert(0, str(ROOT.parents[1]))
 from comfy.cli_args import args
 args.cpu = True

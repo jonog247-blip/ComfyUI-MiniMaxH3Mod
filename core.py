@@ -67,6 +67,64 @@ CONCEPT_TYPES = (
     "style",         # look/grade/animation style, not a concrete subject
 )
 
+# Spelling variants accepted everywhere a concept type is entered (CLI flags,
+# node widgets, saved metadata). The RefMod creation guide documents
+# ``identity`` / ``style`` / ``general`` — ``general`` is this pack's
+# ``generic`` — and users reach for the plain-English names below. Everything
+# is stored canonically, so a mod written as "general" reads back as "generic"
+# and old library filters keep matching.
+CONCEPT_TYPE_ALIASES = {
+    "general": "generic",
+    "mixed": "generic",
+    "unknown": "generic",
+    "character": "identity",
+    "person": "identity",
+    "face": "identity",
+    "portrait": "identity",
+    "pose": "pose_motion",
+    "motion": "pose_motion",
+    "dance": "pose_motion",
+    "camera_move": "pose_motion",
+    "outfit": "clothing",
+    "garment": "clothing",
+    "environment": "background",
+    "set": "background",
+    "location": "background",
+    "art_style": "style",
+    "look": "style",
+    "grade": "style",
+    "speech": "voice",
+    "vocal": "singing",
+    "song": "music_style",
+    "music": "music_style",
+    "sfx": "sound_fx",
+    "ambient": "ambience",
+}
+
+# What the CLIs offer: canonical names plus the accepted aliases.
+CONCEPT_TYPE_CHOICES = tuple(CONCEPT_TYPES) + tuple(sorted(CONCEPT_TYPE_ALIASES))
+
+
+def _slug(value) -> str:
+    return str(value).strip().lower().replace(" ", "_").replace("-", "_")
+
+
+def normalize_concept_type(value) -> Optional[str]:
+    """Canonical concept type for ``value``, or None if it isn't one of ours.
+
+    Unknown strings return None rather than being coerced, so callers can
+    decide: loaders keep a foreign/custom label as-is, while the CLIs reject
+    it with the list of valid names.
+    """
+    if not isinstance(value, str):
+        return None
+    key = _slug(value)
+    if not key:
+        return None
+    if key in CONCEPT_TYPES:
+        return key
+    return CONCEPT_TYPE_ALIASES.get(key)
+
 
 def _blur_latent(z: torch.Tensor, factor: int = 8) -> torch.Tensor:
     """Heavy spatial low-pass (downsample then upsample) used as the
@@ -105,6 +163,52 @@ def _blur_latent(z: torch.Tensor, factor: int = 8) -> torch.Tensor:
     down = F.adaptive_avg_pool3d(z.float(), (t, sh, sw))
     up = F.interpolate(down, size=(t, h, w), mode="trilinear", align_corners=False)
     return up.to(z.dtype)
+
+
+# Memoized blur for the generation hot path. The Step Curve wrapper re-mixes
+# every ref latent once per denoising step (and once per CFG branch), but the
+# blurred copy of a given latent never changes — it only depends on the latent
+# itself. Caching it turns ``steps x refs x cfg`` blurs into one per ref, which
+# matters most on MPS where _blur_latent has to round-trip through CPU.
+#
+# Entries are keyed by object identity *and* keep a reference to the source
+# tensor, so a recycled id()/data_ptr() can never alias a stale blur. Bounded
+# by count and by total bytes; Step Curve clears it when a new wrapper is
+# built so a long-running server doesn't accumulate ref latents.
+_BLUR_CACHE: Dict = {}
+_BLUR_CACHE_MAX = 12
+_BLUR_CACHE_BYTES = 512 * 1024 * 1024
+_BLUR_CACHE_FACTOR = 8
+
+
+def clear_blur_cache() -> None:
+    """Drop every cached blurred latent (call between sampling runs)."""
+    _BLUR_CACHE.clear()
+
+
+def blur_latent_cached(z: torch.Tensor, factor: int = _BLUR_CACHE_FACTOR) -> torch.Tensor:
+    """``_blur_latent(z)`` memoized per source tensor object.
+
+    Same result as calling ``_blur_latent`` directly; only safe for latents
+    that are never mutated in place (RefMod payload latents aren't — the
+    strength mix always allocates a new tensor).
+    """
+    if factor != _BLUR_CACHE_FACTOR:
+        return _blur_latent(z, factor)
+    device = z.device
+    key = (id(z), z.data_ptr(), tuple(z.shape), z.dtype,
+           device.type, device.index if device.type != "cpu" else -1)
+    hit = _BLUR_CACHE.get(key)
+    if hit is not None and hit[0] is z:
+        return hit[1]
+    blurred = _blur_latent(z, factor)
+    _BLUR_CACHE[key] = (z, blurred)
+    while _BLUR_CACHE and (
+            len(_BLUR_CACHE) > _BLUR_CACHE_MAX
+            or sum(v[1].numel() * v[1].element_size()
+                   for v in _BLUR_CACHE.values()) > _BLUR_CACHE_BYTES):
+        _BLUR_CACHE.pop(next(iter(_BLUR_CACHE)))
+    return blurred
 
 
 def read_refmod_meta(path_no_ext: str) -> Optional[Dict]:
@@ -194,6 +298,26 @@ def pool_latent(
     return pooled.to(device=z.device, dtype=z.dtype)
 
 
+def _make_optimizer(params, lr: float, device: Optional[torch.device]):
+    """Adam, using CUDA's fused kernel when it applies.
+
+    The refinement loop is hundreds of tiny steps on a ~1-2K parameter tensor,
+    so it is pure kernel-launch overhead on a GPU. ``fused=True`` collapses
+    Adam's per-parameter update into one kernel; ``foreach`` is the next best
+    thing on other backends. Numerically the same update rule, just fewer
+    launches (measured ~3x fewer CPU-side dispatches per step on CUDA).
+    """
+    if device is not None and device.type == "cuda":
+        try:
+            return torch.optim.Adam(params, lr=lr, fused=True)
+        except (RuntimeError, TypeError, ValueError):
+            pass
+    try:
+        return torch.optim.Adam(params, lr=lr, foreach=True)
+    except (RuntimeError, TypeError, ValueError):
+        return torch.optim.Adam(params, lr=lr)
+
+
 def optimize_latent(
     z_small: torch.Tensor,
     z_full: torch.Tensor,
@@ -201,6 +325,7 @@ def optimize_latent(
     lr: float = 0.02,
     device: Optional[torch.device] = None,
     progress_every: int = 0,
+    tol: float = 0.0,
 ) -> torch.Tensor:
     """
     Model-free refinement of the compressed latent.
@@ -214,6 +339,12 @@ def optimize_latent(
     every N steps so long pooled-mode refinement isn't silent (the default
     ``identity=500`` takes a while per ref on CPU/VRAM-bound setups).
 
+    ``tol`` > 0 stops early once the loss moves less than that *relative*
+    amount between checks (every 10 steps): Adam on this objective flattens
+    out long before the step budget, so the usual 500-step identity refine
+    finishes in a fraction of the steps with the same converged latent.
+    0 (the default) keeps the exact old "run every step" behavior.
+
     Returns the refined latent detached, same shape/dtype as ``z_small``.
     """
     if steps <= 0:
@@ -225,8 +356,9 @@ def optimize_latent(
     with torch.inference_mode(False), torch.set_grad_enabled(True):
         target = z_full.clone().float().to(device)
         param = nn.Parameter(z_small.clone().float().to(device))
-        opt = torch.optim.Adam([param], lr=lr)
+        opt = _make_optimizer([param], lr, device)
         size = tuple(target.shape[2:])
+        last = None
         for i in range(steps):
             opt.zero_grad()
             up = F.interpolate(param, size=size, mode="trilinear", align_corners=False)
@@ -235,6 +367,13 @@ def optimize_latent(
             opt.step()
             if progress_every and (i + 1) % progress_every == 0:
                 print(f"[RefMod] identity {i + 1}/{steps}")
+            if tol > 0 and (i + 1) % 10 == 0:
+                value = float(loss.detach())
+                if last is not None and abs(last - value) <= tol * max(last, 1e-12):
+                    print(f"[RefMod] identity converged at step {i + 1}/{steps} "
+                          f"(loss {value:.3e}, tol {tol:g})")
+                    break
+                last = value
         # materialize inside the scope so the result is a normal tensor, not
         # an inference-mode tensor (it gets stored in the mod and reused)
         refined = param.detach().to(z_small.dtype)
@@ -242,13 +381,14 @@ def optimize_latent(
 
 
 def optimize_latent_multi(z_init, targets, steps=150, lr=0.02, device=None,
-                          progress_every=0, strategy="grouped"):
+                          progress_every=0, strategy="grouped", tol=0.0):
     """Mean reconstruction objective with bounded activation memory.
 
     grouped: average targets with identical shapes on CPU before refinement.
     stream: transfer one target per gradient contribution.
     resident: retain targets on the compute device, backward one at a time.
     All strategies optimize the same mean MSE; grouping drops a constant term.
+    ``tol`` > 0 stops early on a flat loss (see ``optimize_latent``).
     """
     if not targets or steps <= 0:
         return z_init
@@ -272,17 +412,31 @@ def optimize_latent_multi(z_init, targets, steps=150, lr=0.02, device=None,
             target_device = device if strategy == "resident" else "cpu"
             prepared = [(t.detach().to(device=target_device, dtype=torch.float32).clone(), 1 / count) for t in targets]
         param = nn.Parameter(z_init.clone().float().to(device))
-        opt = torch.optim.Adam([param], lr=lr)
+        opt = _make_optimizer([param], lr, device)
+        last = None
         for i in range(steps):
             opt.zero_grad()
+            # only read the loss back (a device sync per target) on the steps
+            # the early-exit check actually looks at
+            watch = tol > 0 and (i + 1) % 10 == 0
+            total = None
             for target, weight in prepared:
                 current = target.to(device)
                 up = F.interpolate(param, size=tuple(current.shape[2:]), mode="trilinear", align_corners=False)
-                (F.mse_loss(up, current) * weight).backward()
+                term = F.mse_loss(up, current) * weight
+                term.backward()
+                if watch:
+                    total = float(term.detach()) if total is None else total + float(term.detach())
                 del up, current
             opt.step()
             if progress_every and (i + 1) % progress_every == 0:
                 print(f"[RefMod] merge {i + 1}/{steps}")
+            if watch and total is not None:
+                if last is not None and abs(last - total) <= tol * max(last, 1e-12):
+                    print(f"[RefMod] merge converged at step {i + 1}/{steps} "
+                          f"(loss {total:.3e}, tol {tol:g})")
+                    break
+                last = total
         return param.detach().to(z_init.dtype)
 
 
@@ -497,7 +651,40 @@ def dedup_frame_indices(z: torch.Tensor, threshold: float = 0.02) -> List[int]:
     return kept
 
 
-def fit_token_budget(latent: torch.Tensor, budget: int, label: str) -> torch.Tensor:
+def select_frames_diverse(z: torch.Tensor, keep: int) -> List[int]:
+    """``keep`` frame indices chosen to stay as different from each other as possible.
+
+    Greedy k-center: start from the frame furthest from the stack's mean, then
+    repeatedly add the frame whose distance to the already-chosen set is
+    largest.  When a token cap forces a cut on a stack of *still* references
+    (the identity case: 8-20 angles/expressions of one person), uniform
+    subsampling keeps whatever happens to sit at even positions — three
+    near-identical front views and no profile.  Spreading the picks over the
+    set keeps more of the concept per token.  For a video reference the
+    uniform order is usually what you want, so callers choose.
+    """
+    t = z.shape[2]
+    if keep >= t:
+        return list(range(t))
+    if keep <= 1:
+        return [0]
+    # z[0] is [C, T, H, W]: frames have to be the leading axis to compare them
+    flat = z[0].float().permute(1, 0, 2, 3).flatten(1)   # [T, C*H*W]
+    flat = flat - flat.mean(1, keepdim=True)
+    norms = flat.norm(dim=1)
+    order = torch.argsort(norms, descending=True)
+    chosen = [int(order[0])]
+    dist = (flat - flat[chosen[0]]).norm(dim=1)
+    for _ in range(keep - 1):
+        dist[chosen] = -1.0
+        nxt = int(torch.argmax(dist))
+        chosen.append(nxt)
+        dist = torch.minimum(dist, (flat - flat[nxt]).norm(dim=1))
+    return sorted(chosen)
+
+
+def fit_token_budget(latent: torch.Tensor, budget: int, label: str,
+                     selection: str = "uniform") -> torch.Tensor:
     """Bring a stacked latent's injected token count under ``budget``.
 
     Tokens = (H/2)*(W/2) per frame (the DiT's 2x2 patch).  When the stack
@@ -505,8 +692,13 @@ def fit_token_budget(latent: torch.Tensor, budget: int, label: str) -> torch.Ten
 
       1. temporal dedup — drop latent frames that are (near-)identical to
          the last kept frame (free: they carry no new reference info);
-      2. budget-fit resample — uniformly subsample the remaining frames down
-         to the largest count that fits the budget.
+      2. budget-fit resample — subsample the remaining frames down to the
+         largest count that fits the budget.  ``selection="uniform"`` (the
+         default, and what saved workflows have always done) takes evenly
+         spaced frames, which preserves a clip's timeline;
+         ``selection="diverse"`` spreads the picks over the stack so a
+         multi-angle still set keeps more distinct views per token (see
+         ``select_frames_diverse``).
 
     The spatial dims are never touched: resizing a latent's H/W changes the
     rope grid and degrades the reference, so time is the only honest lever.
@@ -514,6 +706,8 @@ def fit_token_budget(latent: torch.Tensor, budget: int, label: str) -> torch.Ten
     """
     if budget <= 0:
         return latent
+    if selection not in ("uniform", "diverse"):
+        raise ValueError(f"Unknown frame selection '{selection}'.")
     h, w = latent.shape[3], latent.shape[4]
     per_frame = (h // 2) * (w // 2)
     t = latent.shape[2]
@@ -531,10 +725,15 @@ def fit_token_budget(latent: torch.Tensor, budget: int, label: str) -> torch.Ten
     if per_frame * t > budget:
         fit_t = max(1, budget // per_frame)
         if fit_t < t:
-            idx = torch.linspace(0, t - 1, fit_t).round().long()
+            if selection == "diverse" and fit_t > 1:
+                idx = torch.tensor(select_frames_diverse(latent, fit_t), dtype=torch.long)
+                print(f"[RefMod] {label}: still over {budget}-token cap, "
+                      f"kept the {fit_t} most distinct of {t} frame(s) to fit")
+            else:
+                idx = torch.linspace(0, t - 1, fit_t).round().long()
+                print(f"[RefMod] {label}: still over {budget}-token cap, "
+                      f"resampled {t} -> {fit_t} frame(s) to fit")
             latent = latent[:, :, idx]
-            print(f"[RefMod] {label}: still over {budget}-token cap, "
-                  f"resampled {t} -> {fit_t} frame(s) to fit")
         if per_frame * latent.shape[2] > budget:
             print(f"[RefMod] {label}: one frame alone is {per_frame} tokens > "
                   f"{budget} — lower ref_resolution or pool_h/pool_w to meet "
@@ -596,7 +795,30 @@ class H3RefMod:
             return
         if self.kind not in ("image", "video"):
             raise ValueError(f"kind must be 'image' or 'video' (got {self.kind!r})")
+        if self.latent.ndim != 5 or self.latent.shape[0] != 1:
+            raise ValueError(
+                f"RefMod '{self.name}': expected a visual latent [1, 24, T, H, W], "
+                f"got {tuple(self.latent.shape)}.")
+        if not torch.isfinite(self.latent).all():
+            raise ValueError(
+                f"RefMod '{self.name}': the stored latent contains NaN/Inf values — "
+                f"the encode that produced it failed. Re-extract it (see the "
+                f"RefMod creation guide's troubleshooting section).")
+        # The DiT patchifies each 2x2 latent cell into one token with integer
+        # division, so an odd latent edge silently drops a row/column of the
+        # reference instead of failing. Every writer in this pack rounds to an
+        # even grid; this catches hand-edited or foreign files at load time.
+        if self.latent.shape[3] % 2 or self.latent.shape[4] % 2:
+            raise ValueError(
+                f"RefMod '{self.name}': latent grid {self.latent.shape[3]}x"
+                f"{self.latent.shape[4]} is not even. H3 patches latents in 2x2 "
+                f"cells, so both edges must be even — re-extract this mod.")
         if self.kind == "image":
+            if self.latent.shape[2] != 1:
+                raise ValueError(
+                    f"RefMod '{self.name}': kind='image' but the latent holds "
+                    f"{self.latent.shape[2]} frames. Use kind='video' (the "
+                    f"extractors pick this from the frame count automatically).")
             self.latent_t = 1
 
     # ── token budget ──────────────────────────────────────────────────
@@ -743,7 +965,11 @@ class H3RefMod:
             optimize_steps=int(meta.get("optimize_steps", 0)),
             tags=list(meta.get("tags", [])),
             description=str(meta.get("description", "") or ""),
-            concept_type=str(meta.get("concept_type", "generic") or "generic"),
+            # canonicalize documented aliases ("general" -> "generic") but keep
+            # an unrecognized label verbatim, so custom vocabularies survive a
+            # round-trip through this pack
+            concept_type=(normalize_concept_type(meta.get("concept_type"))
+                          or str(meta.get("concept_type", "generic") or "generic")),
             config=config if isinstance(config, dict) else {},
             path=path_no_ext,
             bundle_index=bundle_index,
