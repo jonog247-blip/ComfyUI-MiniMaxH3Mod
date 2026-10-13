@@ -5,6 +5,32 @@ All notable changes are tracked here. Each version is also published as a
 so you can keep using an older version if a new one changes something you
 rely on.
 
+## v0.2.9 — 2026-10-13
+
+### One graph, one character
+
+- Add `examples/workflows/refmod_character_master.json`: Load H3 RefMod Folder (stills **and** a short motion clip from one folder) + LoadAudio → Master (identity, 1024 px, 8192 tokens, `save_layout = bundle`, `audio_concept_type = voice`) → Inspect → PreviewImage and PreviewAudio. One queue produces one `models/refmods/<name>.safetensors` holding the visual reference and the voice, and Inspect decodes both members back so you can see and hear what was captured before spending GPU time on generation. Both VAELoaders are wired; no DiT and no CLIP are needed.
+- Verified end to end against a live ComfyUI 0.39.0 server: the shipped graph, posted as the frontend would send it, returned `status: success` in 46 s and wrote a version-5 bundle whose visual member is tagged `3 img, 1 vid` (so the motion clip really went through the folder loader) with an audio member of 20 latent frames, both tensors finite, plus a 384×384 image preview and an audio preview. The run used fabricated miniature VAE weights on a 3.8 GB-RAM box with reduced resolution/budget widget values, so it proves the plumbing, not reference quality. On the same run the load-time latent guard fired on a NaN encode from those fabricated weights and failed loudly instead of saving a broken mod.
+- Rebuild all three example graphs with numbered colour groups and a longer instruction Note, and extend `tests/test_example_workflows.py`: the character graph's links and widget values are pinned (folder → `refs_bundle`, `audio`, `vae`, `audio_vae`, `save_layout = bundle`, both previews fed by Inspect), and every graph is checked for layout — exactly one Note, every node inside a group box, no two groups overlapping.
+
+### Speed
+
+- Decode references ahead of the encode instead of one file at a time. `MiniMaxH3RefModFolderLoader` prepares the next stills on daemon threads (`FOLDER_LOADER_PREFETCH = 3`) while the VAE works, and `extract_mod.py` / `scripts/generate_refmod.py` get the same via `--prefetch` (default 2). Measured on a 2-core CPU box: 12 2048² JPEGs at `max_edge=1024` went 1.34 s → 0.64 s (≈2.1×, saturating at the core count); 12 refs at 512 px against a stub VAE that sleeps 60 ms per encode went 0.87 s → 0.79 s. Unreadable files are still reported and skipped rather than aborting the run, and videos stay sequential because one decode already buffers a whole clip.
+- Encode byte-identical sources once and reuse the latent (`--dedupe on`, the default), so a dataset that contains the same shot twice — or the same file listed twice — costs one encode instead of two. `--dedupe off` restores the old loop.
+- Both are asserted in tests to produce exactly the tensors the old sequential path produced, so a saved workflow's output does not change.
+
+### Optional edge-aware refinement
+
+- `optimize_latent` / `optimize_latent_multi` take `objective="mse"|"detail"` and `detail_weight`, exposed as `--refine-objective` and `--refine-detail-weight` (default 1.0) in both CLIs. `detail` adds a per-map Laplacian high-pass term to the reconstruction loss. On a structured synthetic latent over 200 steps at lr 0.05 it cut high-pass error from 0.08725 to 0.07922 (−9 %) while plain MSE rose from 0.01472 to 0.01807 (+23 %); at weight 5 it over-trades. Because it is a trade and not a free win, `mse` remains the default and the node API is unchanged.
+
+### Video references on a stock install
+
+- `common.load_video_file` now falls back to PyAV after OpenCV and imageio. ComfyUI itself depends on PyAV, so a fresh install can read `.mp4`/`.webm`/`.mov` references without installing anything; before this, only OpenCV and imageio were attempted and neither ships with ComfyUI, so every clip failed with "Cannot decode video". When no backend is available the error now names all three attempts. Covered by `VideoDecodeTests`, which encodes a real clip with PyAV and runs it with the optional backends forced absent.
+
+### Tests
+
+- `tests/test_core_refmod.py` 27 → 35 (pipelined-load order, single-worker inline path, off-thread execution, exception propagation, `duplicate_map`, and the `detail` objective), `tests/test_refmod_pipeline.py` 19 → 28 (dedupe on/off, prefetch parity, the `detail` objective through the CLI, folder-loader prefetch parity and skip-not-fatal, video backends), `tests/test_example_workflows.py` 7 → 14.
+
 ## v0.2.8 — 2026-10-12
 
 ### Guide compliance

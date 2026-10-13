@@ -9,8 +9,8 @@
     20
    ],
    "size": [
-    520,
-    330
+    540,
+    340
    ],
    "flags": {},
    "order": 0,
@@ -28,8 +28,8 @@
    "id": 2,
    "type": "VAELoader",
    "pos": [
-    40,
-    420
+    50,
+    440
    ],
    "size": [
     340,
@@ -61,8 +61,8 @@
    "id": 3,
    "type": "MiniMaxH3RefModFolderLoader",
    "pos": [
-    40,
-    560
+    50,
+    620
    ],
    "size": [
     340,
@@ -102,7 +102,7 @@
    "id": 4,
    "type": "MiniMaxH3RefModExtract",
    "pos": [
-    430,
+    480,
     300
    ],
    "size": [
@@ -183,7 +183,7 @@
    "id": 5,
    "type": "MiniMaxH3RefModInspect",
    "pos": [
-    890,
+    970,
     300
    ],
    "size": [
@@ -247,12 +247,12 @@
    "id": 6,
    "type": "PreviewImage",
    "pos": [
-    1300,
+    1360,
     300
    ],
    "size": [
-    360,
-    360
+    320,
+    340
    ],
    "flags": {},
    "order": 5,
@@ -320,11 +320,64 @@
    "IMAGE"
   ]
  ],
- "groups": [],
+ "groups": [
+  {
+   "id": 1,
+   "title": "1 \u00b7 Model",
+   "bounding": [
+    20,
+    400,
+    400,
+    150
+   ],
+   "color": "#3f789e",
+   "font_size": 22,
+   "locked": false
+  },
+  {
+   "id": 2,
+   "title": "2 \u00b7 Source folder",
+   "bounding": [
+    20,
+    580,
+    400,
+    240
+   ],
+   "color": "#8A6642",
+   "font_size": 22,
+   "locked": false
+  },
+  {
+   "id": 3,
+   "title": "3 \u00b7 Extract",
+   "bounding": [
+    450,
+    260,
+    460,
+    700
+   ],
+   "color": "#3f5e3f",
+   "font_size": 22,
+   "locked": false
+  },
+  {
+   "id": 4,
+   "title": "4 \u00b7 Check it",
+   "bounding": [
+    940,
+    260,
+    760,
+    700
+   ],
+   "color": "#7A5C7A",
+   "font_size": 22,
+   "locked": false
+  }
+ ],
  "config": {},
  "extra": {
   "ds": {
-   "scale": 0.6,
+   "scale": 0.55,
    "offset": [
     0,
     0

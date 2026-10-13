@@ -63,6 +63,7 @@ from .common import (
     load_video_file,
     refmods_dir,
     mod_output_path,
+    pipelined,
     resize_ref as _resize_ref,
     sample_video_for_vae as _sample_video_for_vae,
     ensure_min_size as _ensure_min_size,
@@ -1492,24 +1493,46 @@ class MiniMaxH3RefModFolderLoader:
         images, videos = list_media_files(folder)
         items = (images + videos)[:max_items]
         total = len(items)
+        image_set = set(images)
         refs, failed = [], []
         pbar = comfy.utils.ProgressBar(total)
-        for i, p in enumerate(items, start=1):
-            kind = "video" if p in videos else "image"
-            print(f"[MiniMaxH3RefModFolderLoader] [{i}/{total}] loading {kind} "
-                  f"{os.path.basename(p)}")
+
+        def decode(path):
+            """Decode one file; failures come back as values so the loop skips them."""
             try:
-                if p in images:
-                    refs.append(load_image_file(p, max_edge=max_edge))
-                else:
-                    refs.append(load_video_file(p, max_frames=max_frames, max_edge=max_edge))
-            except Exception as exc:
-                failed.append(f"{os.path.basename(p)} ({type(exc).__name__})")
-                pbar.update_absolute(i)
-                continue
-            print(f"[MiniMaxH3RefModFolderLoader] [{i}/{total}] {os.path.basename(p)} "
-                  f"-> {tuple(refs[-1].shape)}")
-            pbar.update_absolute(i)
+                if path in image_set:
+                    return load_image_file(path, max_edge=max_edge)
+                return load_video_file(path, max_frames=max_frames, max_edge=max_edge)
+            except Exception as exc:  # noqa: BLE001 - reported per file below
+                return exc
+
+        def take(path, result, index):
+            if isinstance(result, Exception):
+                failed.append(f"{os.path.basename(path)} ({type(result).__name__})")
+            else:
+                refs.append(result)
+                print(f"[MiniMaxH3RefModFolderLoader] [{index}/{total}] "
+                      f"{os.path.basename(path)} -> {tuple(result.shape)}")
+            pbar.update_absolute(index)
+
+        # Stills decode ahead on worker threads (PIL releases the GIL, so the
+        # next file is read while this one is being converted); list_media_files
+        # puts images first, so splitting keeps the order. A video can be
+        # gigabytes of frames once decoded, so those stay strictly one at a
+        # time — prefetching them would multiply the peak memory.
+        stills = [p for p in items if p in image_set]
+        clips = [p for p in items if p not in image_set]
+        for offset, result in pipelined(stills, decode, workers=FOLDER_LOADER_PREFETCH):
+            path = stills[offset]
+            index = offset + 1
+            print(f"[MiniMaxH3RefModFolderLoader] [{index}/{total}] loading image "
+                  f"{os.path.basename(path)}")
+            take(path, result, index)
+        for offset, path in enumerate(clips):
+            index = len(stills) + offset + 1
+            print(f"[MiniMaxH3RefModFolderLoader] [{index}/{total}] loading video "
+                  f"{os.path.basename(path)}")
+            take(path, decode(path), index)
         if failed:
             print(f"[MiniMaxH3RefModFolderLoader] skipped unreadable files: {', '.join(failed)}")
         if not refs:
@@ -1556,6 +1579,11 @@ class MiniMaxH3RefModMaskList:
 # small to fill a GPU on its own (the H3 VAE tiles internally at 256px), so
 # batching is the main extraction speed lever after resolution.
 EXTRACT_ENCODE_BATCH = 4
+
+# Stills the folder loader decodes ahead of the one it is handing over. Three
+# in flight at a 1024px cap is ~36 MB, and it hides the decode latency of a
+# whole dataset behind the first file.
+FOLDER_LOADER_PREFETCH = 3
 
 
 def _preencode_stills(vae, sources, mode, masks, motion_only, ref_resolution,

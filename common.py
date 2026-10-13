@@ -346,7 +346,12 @@ def _sample_video_frames(frames, total, max_frames, max_edge):
 
 def load_video_file(path: str, max_frames: int = 240,
                     max_edge: Optional[int] = None) -> torch.Tensor:
-    """Load bounded, ordered RGB frames; release either decoder on every exit."""
+    """Load bounded, ordered RGB frames; release every decoder on exit.
+
+    Backends are tried in order: OpenCV, imageio, then PyAV. PyAV is a
+    ComfyUI dependency, so video references work on a stock install; the
+    first two are optional and usually a little faster.
+    """
     if max_frames < 1:
         raise ValueError("max_frames must be at least 1.")
     errors = []
@@ -376,7 +381,110 @@ def load_video_file(path: str, max_frames: int = 240,
             reader.close()
     except (ImportError, OSError, ValueError, RuntimeError) as exc:
         errors.append(str(exc))
+    try:
+        # ComfyUI itself depends on PyAV, so this is the backend that works
+        # on a stock install with nothing extra installed.
+        import av
+        container = av.open(path)
+        try:
+            stream = container.streams.video[0]
+            total = int(stream.frames or 0)
+            def frames():
+                for frame in container.decode(stream):
+                    yield frame.to_ndarray(format="rgb24")
+            return _sample_video_frames(frames(), total, max_frames, max_edge)
+        finally:
+            container.close()
+    except (ImportError, IndexError, OSError, ValueError, RuntimeError) as exc:
+        errors.append(str(exc))
     raise RuntimeError(f"Cannot decode video '{path}': " + "; ".join(errors))
+
+
+def pipelined(items, prepare, workers: int = 2):
+    """Yield ``(index, prepare(item))`` with the next items prepared ahead.
+
+    Decoding and resizing a reference is CPU work; the VAE encode that follows
+    is GPU work. Running them one file at a time leaves the GPU idle for the
+    whole decode, which on a 20-image dataset is a large share of the wall
+    clock. This keeps up to ``workers`` preparations in flight on daemon
+    threads and still yields results in input order, so the caller's logic —
+    and the resulting mod — is bit-for-bit what the sequential loop produced.
+
+    ``workers <= 1`` (or a single item) runs inline: the old path, no threads.
+    Exceptions surface at the yield point exactly as they would inline, so a
+    corrupt file still aborts the run with its own message.
+    """
+    items = list(items)
+    if workers <= 1 or len(items) < 2:
+        for index, item in enumerate(items):
+            yield index, prepare(item)
+        return
+    from collections import deque
+    from concurrent.futures import ThreadPoolExecutor
+
+    pending = deque()
+    source = iter(enumerate(items))
+    with ThreadPoolExecutor(max_workers=min(int(workers), len(items)),
+                            thread_name_prefix="refmod-load") as pool:
+        for _ in range(min(int(workers), len(items))):
+            try:
+                index, item = next(source)
+            except StopIteration:
+                break
+            pending.append((index, pool.submit(prepare, item)))
+        while pending:
+            index, future = pending.popleft()
+            yield index, future.result()
+            try:
+                nxt, item = next(source)
+            except StopIteration:
+                continue
+            pending.append((nxt, pool.submit(prepare, item)))
+
+
+def file_digest(path: str, chunk: int = 1 << 20) -> Optional[str]:
+    """Size + SHA-256 of a file, or None when it can't be read."""
+    import hashlib
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as handle:
+            digest.update(str(os.path.getsize(path)).encode())
+            while True:
+                block = handle.read(chunk)
+                if not block:
+                    break
+                digest.update(block)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def duplicate_map(paths: Sequence[str], log=print) -> Dict[str, str]:
+    """``{duplicate path: first path with identical bytes}``.
+
+    Datasets assembled from several sources routinely carry the same shot
+    twice under different names. Encoding it again costs a full VAE pass and
+    then buys nothing: the two latents are identical, so the second frame is
+    pure token budget. Dropping the repeat before the encode is free — the
+    hash costs one read of the file — and unlike the near-duplicate *warning*
+    this only ever removes byte-identical files, so it cannot drop a distinct
+    view of the subject.
+    """
+    seen: Dict[str, str] = {}
+    repeats: Dict[str, str] = {}
+    for path in paths:
+        digest = file_digest(path)
+        if digest is None:
+            continue
+        if digest in seen:
+            repeats[path] = seen[digest]
+        else:
+            seen[digest] = path
+    if repeats and log:
+        for path, original in repeats.items():
+            log(f"[RefMod] skipping {os.path.basename(path)}: byte-identical to "
+                f"{os.path.basename(original)} (already encoded)")
+    return repeats
 
 
 def mod_output_path(name, subfolder=""):

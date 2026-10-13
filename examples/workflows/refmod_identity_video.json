@@ -9,8 +9,8 @@
     20
    ],
    "size": [
-    520,
-    400
+    540,
+    410
    ],
    "flags": {},
    "order": 0,
@@ -28,11 +28,11 @@
    "id": 2,
    "type": "UNETLoader",
    "pos": [
-    40,
-    480
+    50,
+    500
    ],
    "size": [
-    360,
+    340,
     90
    ],
    "flags": {},
@@ -61,8 +61,8 @@
    "id": 3,
    "type": "MiniMaxH3SigmaShift",
    "pos": [
-    450,
-    480
+    480,
+    500
    ],
    "size": [
     330,
@@ -100,11 +100,11 @@
    "id": 4,
    "type": "CLIPLoader",
    "pos": [
-    40,
-    620
+    50,
+    640
    ],
    "size": [
-    360,
+    340,
     130
    ],
    "flags": {},
@@ -135,11 +135,11 @@
    "id": 5,
    "type": "VAELoader",
    "pos": [
-    40,
-    800
+    50,
+    820
    ],
    "size": [
-    360,
+    340,
     70
    ],
    "flags": {},
@@ -163,17 +163,18 @@
    },
    "widgets_values": [
     "minimax_h3_video_vae_fp16.safetensors"
-   ]
+   ],
+   "title": "VAELoader (video)"
   },
   {
    "id": 6,
    "type": "VAELoader",
    "pos": [
-    40,
-    910
+    50,
+    920
    ],
    "size": [
-    360,
+    340,
     70
    ],
    "flags": {},
@@ -202,11 +203,11 @@
    "id": 7,
    "type": "MiniMaxH3RefModsLoader",
    "pos": [
-    40,
-    1030
+    50,
+    1080
    ],
    "size": [
-    360,
+    340,
     760
    ],
    "flags": {},
@@ -289,8 +290,8 @@
    "id": 8,
    "type": "MiniMaxH3ImageToVideo",
    "pos": [
-    450,
-    640
+    480,
+    660
    ],
    "size": [
     420,
@@ -354,8 +355,8 @@
    "id": 9,
    "type": "MiniMaxH3ImageToVideo",
    "pos": [
-    450,
-    1010
+    480,
+    1030
    ],
    "size": [
     420,
@@ -417,8 +418,8 @@
    "id": 10,
    "type": "MiniMaxH3RefModApply",
    "pos": [
-    920,
-    640
+    940,
+    660
    ],
    "size": [
     400,
@@ -477,8 +478,8 @@
    "id": 11,
    "type": "KSampler",
    "pos": [
-    1370,
-    640
+    1390,
+    660
    ],
    "size": [
     330,
@@ -537,8 +538,8 @@
    "id": 12,
    "type": "VAEDecode",
    "pos": [
-    1750,
-    640
+    1780,
+    660
    ],
    "size": [
     230,
@@ -578,8 +579,8 @@
    "id": 13,
    "type": "VAEDecodeAudio",
    "pos": [
-    1750,
-    760
+    1780,
+    780
    ],
    "size": [
     230,
@@ -619,8 +620,8 @@
    "id": 14,
    "type": "CreateVideo",
    "pos": [
-    2030,
-    640
+    2060,
+    660
    ],
    "size": [
     260,
@@ -665,8 +666,8 @@
    "id": 15,
    "type": "SaveVideo",
    "pos": [
-    2340,
-    640
+    2370,
+    660
    ],
    "size": [
     300,
@@ -845,11 +846,64 @@
    "VIDEO"
   ]
  ],
- "groups": [],
+ "groups": [
+  {
+   "id": 1,
+   "title": "1 \u00b7 Models",
+   "bounding": [
+    20,
+    460,
+    400,
+    560
+   ],
+   "color": "#3f789e",
+   "font_size": 22,
+   "locked": false
+  },
+  {
+   "id": 2,
+   "title": "2 \u00b7 RefMod",
+   "bounding": [
+    20,
+    1040,
+    400,
+    800
+   ],
+   "color": "#3f5e3f",
+   "font_size": 22,
+   "locked": false
+  },
+  {
+   "id": 3,
+   "title": "3 \u00b7 Conditioning",
+   "bounding": [
+    450,
+    460,
+    900,
+    900
+   ],
+   "color": "#8A6642",
+   "font_size": 22,
+   "locked": false
+  },
+  {
+   "id": 4,
+   "title": "4 \u00b7 Sample and save",
+   "bounding": [
+    1380,
+    460,
+    1300,
+    700
+   ],
+   "color": "#7A5C7A",
+   "font_size": 22,
+   "locked": false
+  }
+ ],
  "config": {},
  "extra": {
   "ds": {
-   "scale": 0.6,
+   "scale": 0.55,
    "offset": [
     0,
     0

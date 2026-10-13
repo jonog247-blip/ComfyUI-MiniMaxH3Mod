@@ -29,7 +29,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT.parents[1]))   # the ComfyUI install this pack lives in
 
-from common import encode_ref_stills
+from common import encode_ref_stills, load_video_file
 from core import H3RefMod, read_refmod_meta
 from h3_vae_stub import StubH3VAE
 
@@ -282,6 +282,71 @@ class RefModPipelineTests(unittest.TestCase):
         self.assertTrue(all(c[0] == 1 for c in vae.calls))
 
 
+    # ── the 0.2.9 speed paths ─────────────────────────────────────────
+
+    def test_byte_identical_source_is_encoded_once(self):
+        import shutil
+        dup_dir = Path(self.temp.name) / "WithDuplicate"
+        dup_dir.mkdir()
+        paths = []
+        for i, src in enumerate(self.images[:4]):
+            dst = dup_dir / f"copy{i}.png"
+            shutil.copyfile(src, dst)
+            paths.append(str(dst))
+        repeat = dup_dir / "copy0_again.png"
+        shutil.copyfile(paths[0], repeat)          # same bytes, different name
+        argv = ["--vae", str(self.vae_path), "--name", "deduped", "--mode", "encode",
+                "--resolution", "512", "--output", self.out.name,
+                "--concept-type", "identity"]
+        argv += sum([["--image", p] for p in paths + [str(repeat)]], [])
+        mod = extract_mod.main(argv)
+        self.assertEqual(mod.latent_t, len(paths),
+                         "the byte-identical repeat must not cost a frame")
+        self.assertIn("byte-identical", self.log.getvalue())
+
+    def test_dedupe_off_keeps_the_repeat(self):
+        import shutil
+        dup_dir = Path(self.temp.name) / "KeepDuplicate"
+        dup_dir.mkdir()
+        first = dup_dir / "a.png"
+        second = dup_dir / "b.png"
+        shutil.copyfile(self.images[0], first)
+        shutil.copyfile(self.images[0], second)
+        argv = ["--vae", str(self.vae_path), "--name", "kept", "--mode", "encode",
+                "--resolution", "512", "--output", self.out.name,
+                "--dedupe", "off", "--image", str(first), "--image", str(second)]
+        self.assertEqual(extract_mod.main(argv).latent_t, 2)
+
+    def test_prefetch_does_not_change_the_mod(self):
+        latents = {}
+        for workers in ("1", "3"):
+            argv = ["--vae", str(self.vae_path), "--name", f"prefetch{workers}",
+                    "--mode", "encode", "--resolution", "512",
+                    "--output", self.out.name, "--prefetch", workers,
+                    "--encode-batch", "2", "--concept-type", "identity"]
+            argv += sum([["--image", p] for p in self.images[:6]], [])
+            latents[workers] = extract_mod.main(argv).latent
+        self.assertTrue(torch.equal(latents["1"], latents["3"]),
+                        "prefetching may only change the wall clock")
+
+    def test_detail_objective_changes_the_refined_latent(self):
+        """The edge objective really reaches the refine loop from the CLI."""
+        def run(name, *extra):
+            argv = ["--vae", str(self.vae_path), "--name", name, "--mode", "training",
+                    "--resolution", "512", "--output", self.out.name, "--identity", "30",
+                    "--pool", "8", "--image", self.images[0], "--image", self.images[1]]
+            return extract_mod.main(argv + list(extra))
+
+        plain = run("obj_mse", "--refine-objective", "mse")
+        edged = run("obj_detail", "--refine-objective", "detail")
+        pooled = run("obj_none", "--identity", "0")
+        self.assertEqual(plain.optimize_steps, 30)
+        self.assertFalse(torch.equal(plain.latent, pooled.latent),
+                         "sanity: refinement must move the pooled latent at all")
+        self.assertFalse(torch.equal(plain.latent, edged.latent),
+                         "the detail objective must reach the refine loop")
+
+
 class NodeStubVAE(StubH3VAE):
     """Pretends to live on CUDA so the node's batched path engages on a CPU box.
 
@@ -379,6 +444,103 @@ def reset_batch_verdicts():
     """Drop the per-VAE batching verdict so each test starts undecided."""
     import common
     common._BATCH_VERDICTS.clear()
+
+
+class FolderLoaderTests(unittest.TestCase):
+    """The folder loader decodes ahead on worker threads; the result must not care."""
+
+    @classmethod
+    def setUpClass(cls):
+        from comfy.cli_args import args
+        args.cpu = True
+        try:
+            cls.N = importlib.import_module(f"custom_nodes.{ROOT.name}.nodes")
+        except Exception as exc:                      # pragma: no cover
+            raise unittest.SkipTest(f"pack nodes not importable here: {exc}")
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.folder = Path(self.temp.name) / "refs"
+        make_dataset(self.folder, 6, size=(256, 256))
+        (self.folder / "broken.png").write_bytes(b"not a png at all")
+
+    def load(self, workers):
+        loader = self.N.MiniMaxH3RefModFolderLoader()
+        with patch.object(self.N, "FOLDER_LOADER_PREFETCH", workers), \
+                patch.object(self.N.folder_paths, "get_input_directory",
+                             return_value=self.temp.name):
+            refs, count = loader.load("refs", max_items=32, max_frames=8, max_edge=256)
+        return refs, count
+
+    def test_prefetch_depth_does_not_change_what_is_loaded(self):
+        serial, serial_count = self.load(1)
+        ahead, ahead_count = self.load(3)
+        self.assertEqual(serial_count, ahead_count)
+        self.assertEqual([tuple(r.shape) for r in serial],
+                         [tuple(r.shape) for r in ahead])
+        for a, b in zip(serial, ahead):
+            self.assertTrue(torch.equal(a, b))
+
+    def test_unreadable_files_are_still_skipped_not_fatal(self):
+        refs, count = self.load(3)
+        self.assertEqual(count, 6)          # the broken file is reported, not raised
+        self.assertEqual(len(refs), 6)
+
+
+class VideoDecodeTests(unittest.TestCase):
+    """A video reference has to decode with whatever the install happens to have.
+
+    PyAV ships with ComfyUI, so it is the backend that works everywhere; the
+    two faster ones are optional. Only PyAV is asserted to exist here.
+    """
+
+    FRAMES = 6
+    ABSENT = {"cv2": None, "imageio": None, "imageio.v2": None}
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import av
+        except ImportError:                              # pragma: no cover
+            raise unittest.SkipTest("PyAV is not installed")
+        temp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(temp.cleanup)
+        cls.path = str(Path(temp.name) / "clip.mp4")
+        container = av.open(cls.path, mode="w")
+        stream = container.add_stream("libx264", rate=8)
+        stream.width, stream.height = 96, 64
+        stream.pix_fmt = "yuv420p"
+        for i in range(cls.FRAMES):
+            frame = np.full((64, 96, 3), i * 30, np.uint8)
+            stream.encode(av.VideoFrame.from_ndarray(frame, format="rgb24"))
+        for packet in stream.encode():
+            container.mux(packet)
+        container.close()
+
+    def test_pyav_decodes_when_the_optional_backends_are_absent(self):
+        with patch.dict(sys.modules, self.ABSENT):
+            frames = load_video_file(self.path, max_frames=self.FRAMES)
+        self.assertEqual(tuple(frames.shape), (self.FRAMES, 64, 96, 3))
+        self.assertLessEqual(float(frames.max()), 1.0)
+        self.assertGreaterEqual(float(frames.min()), 0.0)
+        # the frames are genuinely different, and in decode order
+        self.assertFalse(torch.equal(frames[0], frames[-1]))
+
+    def test_frame_budget_is_honoured_by_the_pyav_backend(self):
+        with patch.dict(sys.modules, self.ABSENT):
+            frames = load_video_file(self.path, max_frames=3)
+        self.assertEqual(frames.shape[0], 3)
+
+    def test_no_backend_reports_every_attempt(self):
+        absent = dict(self.ABSENT)
+        absent["av"] = None
+        with patch.dict(sys.modules, absent):
+            with self.assertRaises(RuntimeError) as caught:
+                load_video_file(self.path)
+        message = str(caught.exception)
+        for backend in ("cv2", "imageio", "av"):
+            self.assertIn(backend, message)
 
 
 if __name__ == "__main__":

@@ -5,6 +5,26 @@
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/C0C2EV9GW)
 
+## What's new — v0.2.9
+
+- **One graph, one character** — `examples/workflows/refmod_character_master.json`
+  turns a folder of stills **plus a short motion clip plus a voice clip** into a
+  single visual+audio RefMod bundle, then decodes both members back so you can
+  see and hear what was captured. See [Test workflows](#test-workflows).
+- **Decode runs ahead of the encode** — the folder loader prepares the next
+  stills on worker threads while the VAE works, and both CLIs get the same
+  treatment (`--prefetch`). Measured on a 2-core CPU box: 12 2048² JPEGs at
+  `max_edge=1024` went from 1.34 s to 0.64 s, bit-for-bit the same tensors.
+- **Duplicate sources encode once** — two byte-identical files in a dataset cost
+  one encode, not two (`--dedupe on`, the default; `off` restores the old loop).
+- **Optional edge-aware refinement** — `--refine-objective detail` adds a
+  Laplacian term to the refinement loss: measurably sharper latents in exchange
+  for a little plain MSE. It is a trade, so `mse` stays the default.
+- **Video references work on a stock install** — video decode now falls back to
+  PyAV, which ComfyUI already ships. Until now only OpenCV and imageio were
+  tried, and neither comes with ComfyUI, so a fresh install could not read a
+  single clip.
+
 ## What's new — v0.2.8
 
 - **Whole-folder extraction** — [`scripts/generate_refmod.py`](#whole-dataset-folder-scriptsgenerate_refmodpy)
@@ -25,9 +45,10 @@
   count or a sub-100 KB output now says what is wrong instead of degrading
   silently three nodes later.
 - **Loadable test workflows** — [`examples/workflows/`](#test-workflows) ships a
-  VAE-only smoke test (folder → mod → decoded preview, no 29B model needed) and
-  a full identity-generation graph, both checked against the live node schemas
-  and ComfyUI's own prompt validator on every test run.
+  VAE-only smoke test (folder → mod → decoded preview, no 29B model needed), a
+  full character-bundle graph (stills + motion clip + voice → one RefMod) and a
+  full identity-generation graph, all checked against the live node schemas and
+  ComfyUI's own prompt validator on every test run.
 
 ## What's new — v0.2.6
 
@@ -135,14 +156,24 @@ a candy racer in a karting scene.
 
 ### Test workflows
 
-Two loadable graphs ship in **`examples/workflows/`** — drag either one onto
-the ComfyUI canvas (or use *Load* from the workflow menu). Each carries a Note
-with the same instructions.
+Three loadable graphs ship in **`examples/workflows/`** — drag one onto the
+ComfyUI canvas (or use *Load* from the workflow menu). Each is laid out in
+numbered colour groups and carries a Note with the same instructions.
 
 | File | Needs | What it proves |
 | --- | --- | --- |
 | `refmod_smoke_test.json` | the H3 video VAE only — **no 29B DiT, no CLIP** | extraction works end to end: a folder of images → `models/refmods/smoke_test_identity.safetensors` → loaded back and decoded to a preview image |
+| `refmod_character_master.json` | the H3 video **and** audio VAEs — still no DiT or CLIP | a whole character in one pass: a folder of stills **and** a short motion clip, plus a voice clip → one `models/refmods/my_character.safetensors` bundle holding both, decoded back to an image *and* an audio preview |
 | `refmod_identity_video.json` | H3 DiT + CLIP + video VAE (+ audio VAE for sound) | the RefMod is injected into real generation: prompt → Apply → sampler → video file |
+
+**The character graph** is the one to reach for when building a persona. Drop
+8-20 images of the subject (the creation guide's mix: ~40% front, 30%
+three-quarter, 20% profile, 10% full body) and one 5-10 second clip into
+`ComfyUI/input/character_ref/` — the folder loader takes images first, then
+videos, so a single folder feeds both — and pick the voice clip with LoadAudio.
+Master runs at the guide's 1024 px / 8192-token budget with `save_layout =
+bundle`, so appearance, motion and voice land in one file that Load H3 RefMods
+can pick up as a single entry.
 
 Run the smoke test first; it needs about 1 GB of model and a few minutes on a
 GPU. Put 3-8 images of one subject in `ComfyUI/input/refmod_test/` (or point
@@ -184,8 +215,9 @@ test suite rather than a user's canvas.
 2. **This pack**: clone into `custom_nodes/` and restart ComfyUI. Python
    deps (`safetensors`, `numpy`, `Pillow`) are in `requirements.txt` and are
    installed automatically by ComfyUI Manager (or `pip install -r
-   requirements.txt` manually). `opencv-python`/`imageio` are optional video
-   backends for the folder loader.
+   requirements.txt` manually). Video files decode through PyAV, which
+   ComfyUI already ships, so the folder loader works out of the box;
+   `opencv-python`/`imageio` are optional extra backends that are tried first.
    
    ```bash
    git clone https://github.com/Luisacaotica/ComfyUI-MiniMaxH3Mod custom_nodes/ComfyUI-MiniMaxH3Mod
@@ -946,8 +978,19 @@ python custom_nodes/ComfyUI-MiniMaxH3Mod/extract_mod.py \
 Other options include `--pool-w`, `--max-tokens`, `--frame-selection`,
 `--refine-tol`, `--multiplier`, `--subfolder`, `--output`, `--comfy-dir`,
 `--max-edge`, `--max-frames`, `--description`, `--concept-type`,
-`--encode-batch`, `--resize-on-gpu` and `--device`. Run `--help` for defaults.
-Video decode uses OpenCV or imageio. Files use embedded metadata; legacy JSON
+`--encode-batch`, `--resize-on-gpu`, `--device`, `--prefetch`, `--dedupe` and
+`--refine-objective`/`--refine-detail-weight`. Run `--help` for defaults.
+
+`--refine-objective detail` (only meaningful with refinement steps, i.e.
+Compressed/`training` mode) adds a Laplacian high-pass term to the refinement
+loss. On a structured synthetic latent over 200 steps it cut high-pass error
+from 0.08725 to 0.07922 (−9 %) while plain MSE rose from 0.01472 to 0.01807
+(+23 %): sharper edges bought with a little flatness of fit, which is why the
+default stays `mse`. `--refine-detail-weight` scales the term; large values
+(≥5) over-trade.
+
+Video decode tries OpenCV, then imageio, then PyAV (already a ComfyUI
+dependency), so no extra install is needed. Files use embedded metadata; legacy JSON
 sidecars remain supported.
 
 `--concept-type` accepts the canonical names plus documented aliases, stored
@@ -968,6 +1011,17 @@ Extraction is dominated by the VAE encode, so that is what gets optimized:
 | Stills resized on the GPU | lanczos of a large source is faster than the extra upload | `--resize-on-gpu never` |
 | Refinement early exit | stops when the loss is flat instead of running all `--identity` steps | `--refine-tol 0` |
 | Fused Adam in the refinement loop | one kernel per step instead of several | automatic fallback |
+| Byte-identical sources encoded once | a repeated file costs one encode, not two | `--dedupe off` |
+| Stills decoded ahead of the encode | decode/resize overlaps the GPU pass instead of blocking it | `--prefetch 1` |
+
+The last two are not CUDA-specific and were measured without a GPU: on a 2-core
+CPU box, 12 2048² JPEGs through the folder loader at `max_edge=1024` went from
+1.34 s to 0.64 s (about 2.1×, saturating at the core count), and the same set
+through `extract_mod.py` against a stub VAE that sleeps 60 ms per encode went
+from 0.87 s to 0.79 s. The gain grows with resolution, because decoding a large
+source costs more next to the encode. Both are asserted to produce exactly the
+tensors the old sequential loop produced; videos stay sequential, since one
+decode already buffers a whole clip.
 
 Both settings that touch global torch state are restored afterwards, so a
 custom node never changes the numerics of the rest of your ComfyUI process.
@@ -1021,7 +1075,11 @@ The example-workflow suite validates every JSON in `examples/workflows/`
 against the live node schemas — node types, widget order and count, link slots
 and types — and then pushes each converted graph through ComfyUI's own
 `execution.validate_prompt`, the same validator the queue uses. Placeholder
-model names stand in for the checkpoints, so it needs no weights and no GPU.
+model names stand in for the checkpoints, so it needs no weights and no GPU. It
+also pins the character graph's wiring (folder → `refs_bundle`, `audio`, both
+VAEs, `save_layout = bundle`, both previews fed by Inspect) and its layout:
+exactly one instruction Note per graph, every node inside a group box, and no
+two groups overlapping.
 
 The extraction-pipeline suite runs `scripts/generate_refmod.py` and
 `extract_mod.py` end to end against a stub VAE that follows `comfy.sd.VAE`'s

@@ -1,0 +1,539 @@
+{
+ "last_node_id": 9,
+ "nodes": [
+  {
+   "id": 1,
+   "type": "Note",
+   "pos": [
+    40,
+    20
+   ],
+   "size": [
+    600,
+    470
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [],
+   "properties": {},
+   "widgets_values": [
+    "Full character RefMod \u2014 images + a short video + a voice clip in one bundle.\n\nMODELS (ComfyUI/models/vae/) \u2014 extraction needs the two VAEs and nothing\nelse; no 29B DiT, no CLIP:\n    minimax_h3_video_vae_fp16.safetensors\n    your MiniMax-H3 audio VAE\n\nSOURCES: put 8-20 images of the character AND one short clip (5-10 s,\nmp4/webm/mov/mkv) in  ComfyUI/input/character_ref/  \u2014 the folder loader\ntakes images first, then videos, so one folder feeds both. The creation\nguide's mix works best: ~40% front, 30% three-quarter, 20% profile,\n10% full body. Video decoding needs no extra install (ComfyUI ships\nPyAV); opencv-python or imageio are used first when present.\nDrop the voice clip into ComfyUI/input/ and pick it in LoadAudio.\n\nQUEUE: you get ONE file \u2014 models/refmods/my_character.safetensors \u2014 holding\nthe visual reference and the voice (save_layout = bundle).\n\nCHECK: Inspect decodes the stored latent and the stored audio back, so you\ncan see and hear what was captured before spending GPU time on generation.\n\nUSE IT: add a Load H3 RefMods node, press R to refresh its list, pick\nmy_character, and chain Apply H3 RefMod into your sampler \u2014 the wiring is\nin examples/workflows/refmod_identity_video.json."
+   ],
+   "color": "#432",
+   "bgcolor": "#653"
+  },
+  {
+   "id": 2,
+   "type": "VAELoader",
+   "pos": [
+    50,
+    570
+   ],
+   "size": [
+    340,
+    70
+   ],
+   "flags": {},
+   "order": 1,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "VAE",
+     "type": "VAE",
+     "links": [
+      1,
+      6
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "VAELoader"
+   },
+   "widgets_values": [
+    "minimax_h3_video_vae_fp16.safetensors"
+   ],
+   "title": "VAELoader (video)"
+  },
+  {
+   "id": 3,
+   "type": "VAELoader",
+   "pos": [
+    50,
+    680
+   ],
+   "size": [
+    340,
+    70
+   ],
+   "flags": {},
+   "order": 2,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "VAE",
+     "type": "VAE",
+     "links": [
+      2
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "VAELoader"
+   },
+   "widgets_values": [
+    "minimax_h3_audio_vae.safetensors"
+   ],
+   "title": "VAELoader (audio)"
+  },
+  {
+   "id": 4,
+   "type": "MiniMaxH3RefModFolderLoader",
+   "pos": [
+    50,
+    850
+   ],
+   "size": [
+    340,
+    150
+   ],
+   "flags": {},
+   "order": 3,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "refs",
+     "type": "H3_REF_LIST",
+     "links": [
+      3
+     ],
+     "slot_index": 0
+    },
+    {
+     "name": "count",
+     "type": "INT",
+     "links": [],
+     "slot_index": 1
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "MiniMaxH3RefModFolderLoader"
+   },
+   "widgets_values": [
+    "character_ref",
+    32,
+    240,
+    1024
+   ],
+   "title": "Load H3 RefMod Folder (images + clip)"
+  },
+  {
+   "id": 5,
+   "type": "LoadAudio",
+   "pos": [
+    50,
+    1030
+   ],
+   "size": [
+    340,
+    90
+   ],
+   "flags": {},
+   "order": 4,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "AUDIO",
+     "type": "AUDIO",
+     "links": [
+      4
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "LoadAudio"
+   },
+   "widgets_values": [
+    "voice_clip.wav"
+   ]
+  },
+  {
+   "id": 6,
+   "type": "MiniMaxH3RefModMasterExtract",
+   "pos": [
+    480,
+    570
+   ],
+   "size": [
+    420,
+    640
+   ],
+   "flags": {},
+   "order": 5,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "refs_bundle",
+     "type": "H3_REF_LIST",
+     "link": 3
+    },
+    {
+     "name": "mask",
+     "type": "MASK",
+     "link": null
+    },
+    {
+     "name": "av_encoder",
+     "type": "MINIMAX_H3_AV_ENCODER",
+     "link": null
+    },
+    {
+     "name": "vae",
+     "type": "VAE",
+     "link": 1
+    },
+    {
+     "name": "mask_list",
+     "type": "H3_MASK_LIST",
+     "link": null
+    },
+    {
+     "name": "audio",
+     "type": "AUDIO",
+     "link": 4
+    },
+    {
+     "name": "audio_vae",
+     "type": "VAE",
+     "link": 2
+    }
+   ],
+   "outputs": [
+    {
+     "name": "mods",
+     "type": "H3_REF_MODS",
+     "links": [
+      5
+     ],
+     "slot_index": 0
+    },
+    {
+     "name": "details",
+     "type": "STRING",
+     "links": [],
+     "slot_index": 1
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "MiniMaxH3RefModMasterExtract"
+   },
+   "widgets_values": [
+    "my_character",
+    "Full Reference",
+    "identity",
+    0.0,
+    1024,
+    16,
+    16,
+    16,
+    0,
+    false,
+    false,
+    1,
+    8192,
+    "full character: stills + motion clip + voice",
+    true,
+    30.0,
+    5120,
+    "truncate",
+    "voice",
+    0,
+    "manual",
+    "",
+    "truncate",
+    "bundle"
+   ]
+  },
+  {
+   "id": 7,
+   "type": "MiniMaxH3RefModInspect",
+   "pos": [
+    990,
+    570
+   ],
+   "size": [
+    360,
+    190
+   ],
+   "flags": {},
+   "order": 6,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "mods",
+     "type": "H3_REF_MODS",
+     "link": 5
+    },
+    {
+     "name": "vae",
+     "type": "VAE",
+     "link": 6
+    }
+   ],
+   "outputs": [
+    {
+     "name": "details",
+     "type": "STRING",
+     "links": [],
+     "slot_index": 0
+    },
+    {
+     "name": "image_preview",
+     "type": "IMAGE",
+     "links": [
+      7
+     ],
+     "slot_index": 1
+    },
+    {
+     "name": "audio_preview",
+     "type": "AUDIO",
+     "links": [
+      8
+     ],
+     "slot_index": 2
+    },
+    {
+     "name": "reference_map",
+     "type": "STRING",
+     "links": [],
+     "slot_index": 3
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "MiniMaxH3RefModInspect"
+   },
+   "widgets_values": [
+    0,
+    "stored",
+    0.5,
+    "first_frame"
+   ]
+  },
+  {
+   "id": 8,
+   "type": "PreviewImage",
+   "pos": [
+    1380,
+    570
+   ],
+   "size": [
+    320,
+    340
+   ],
+   "flags": {},
+   "order": 7,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "link": 7
+    }
+   ],
+   "outputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "links": [],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "PreviewImage"
+   },
+   "widgets_values": []
+  },
+  {
+   "id": 9,
+   "type": "PreviewAudio",
+   "pos": [
+    990,
+    800
+   ],
+   "size": [
+    360,
+    110
+   ],
+   "flags": {},
+   "order": 8,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "audio",
+     "type": "AUDIO",
+     "link": 8
+    }
+   ],
+   "outputs": [
+    {
+     "name": "audio",
+     "type": "AUDIO",
+     "links": [],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "PreviewAudio"
+   },
+   "widgets_values": []
+  }
+ ],
+ "links": [
+  [
+   1,
+   2,
+   0,
+   6,
+   25,
+   "VAE"
+  ],
+  [
+   2,
+   3,
+   0,
+   6,
+   30,
+   "VAE"
+  ],
+  [
+   3,
+   4,
+   0,
+   6,
+   22,
+   "H3_REF_LIST"
+  ],
+  [
+   4,
+   5,
+   0,
+   6,
+   29,
+   "AUDIO"
+  ],
+  [
+   5,
+   6,
+   0,
+   7,
+   0,
+   "H3_REF_MODS"
+  ],
+  [
+   6,
+   2,
+   0,
+   7,
+   4,
+   "VAE"
+  ],
+  [
+   7,
+   7,
+   1,
+   8,
+   0,
+   "IMAGE"
+  ],
+  [
+   8,
+   7,
+   2,
+   9,
+   0,
+   "AUDIO"
+  ]
+ ],
+ "groups": [
+  {
+   "id": 1,
+   "title": "1 \u00b7 Models",
+   "bounding": [
+    20,
+    530,
+    400,
+    250
+   ],
+   "color": "#3f789e",
+   "font_size": 22,
+   "locked": false
+  },
+  {
+   "id": 2,
+   "title": "2 \u00b7 Sources: stills + clip + voice",
+   "bounding": [
+    20,
+    810,
+    400,
+    390
+   ],
+   "color": "#8A6642",
+   "font_size": 22,
+   "locked": false
+  },
+  {
+   "id": 3,
+   "title": "3 \u00b7 Extract one character bundle",
+   "bounding": [
+    450,
+    530,
+    480,
+    700
+   ],
+   "color": "#3f5e3f",
+   "font_size": 22,
+   "locked": false
+  },
+  {
+   "id": 4,
+   "title": "4 \u00b7 See it and hear it",
+   "bounding": [
+    960,
+    530,
+    760,
+    700
+   ],
+   "color": "#7A5C7A",
+   "font_size": 22,
+   "locked": false
+  }
+ ],
+ "config": {},
+ "extra": {
+  "ds": {
+   "scale": 0.55,
+   "offset": [
+    0,
+    0
+   ]
+  },
+  "workflow_info": {
+   "name": "H3 character RefMod \u2014 images + video + voice",
+   "description": "One folder of stills plus a motion clip plus a voice clip into a single visual+audio RefMod bundle, with visual and audio previews.",
+   "requires": [
+    "MiniMax-H3 video VAE",
+    "MiniMax-H3 audio VAE"
+   ]
+  }
+ },
+ "version": 0.4
+}

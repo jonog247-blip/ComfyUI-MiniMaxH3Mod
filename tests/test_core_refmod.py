@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT.parents[1]))
 
 import common
+from common import duplicate_map, pipelined
 from core import (CONCEPT_TYPES, H3RefMod, _blur_latent, blur_latent_cached,
                   clear_blur_cache, fit_token_budget, normalize_concept_type,
                   optimize_latent, select_frames_diverse)
@@ -272,6 +273,114 @@ class OutputPathTests(unittest.TestCase):
             Path(big).write_bytes(b"x" * (200 * 1024))
             self.assertTrue(common.warn_if_implausible_size(big, 1024, log=lambda *_: None))
             self.assertFalse(common.warn_if_implausible_size(big, 0, log=log.write))
+
+
+
+
+class PipelineHelpersTests(unittest.TestCase):
+    """The prefetch/dedupe helpers the CLIs and the folder loader run on."""
+
+    def test_pipelined_preserves_input_order(self):
+        got = [value for _, value in pipelined(list(range(12)), lambda x: x * 3, workers=4)]
+        self.assertEqual(got, [x * 3 for x in range(12)])
+
+    def test_single_worker_stays_on_the_calling_thread(self):
+        import threading
+        seen = set()
+
+        def prepare(x):
+            seen.add(threading.current_thread().name)
+            return x
+
+        got = [value for _, value in pipelined([1, 2, 3], prepare, workers=1)]
+        self.assertEqual(got, [1, 2, 3])
+        self.assertEqual(seen, {threading.current_thread().name})
+
+    def test_workers_decode_off_the_calling_thread(self):
+        import threading
+        seen = set()
+
+        def prepare(x):
+            seen.add(threading.current_thread().name)
+            return x
+
+        list(pipelined(list(range(8)), prepare, workers=3))
+        self.assertTrue(any(name != threading.current_thread().name for name in seen))
+
+    def test_a_failing_item_raises_where_the_sequential_loop_would(self):
+        def prepare(x):
+            if x == 3:
+                raise ValueError(f"cannot decode {x}")
+            return x
+
+        with self.assertRaisesRegex(ValueError, "cannot decode 3"):
+            list(pipelined(list(range(6)), prepare, workers=3))
+
+    def test_duplicate_map_flags_only_byte_identical_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a = os.path.join(tmp, "a.png")
+            b = os.path.join(tmp, "b_copy.png")
+            c = os.path.join(tmp, "c.png")
+            with open(a, "wb") as handle:
+                handle.write(b"\x89PNG" + bytes(range(64)))
+            with open(b, "wb") as handle:
+                handle.write(b"\x89PNG" + bytes(range(64)))
+            with open(c, "wb") as handle:
+                handle.write(b"\x89PNG" + bytes(range(64, 128)))
+            repeats = duplicate_map([a, b, c], log=None)
+            self.assertEqual(repeats, {b: a})
+
+
+class RefineObjectiveTests(unittest.TestCase):
+    """The optional edge term in the training-mode refinement.
+
+    The target is structured rather than noise: on random noise the MSE and
+    detail objectives are hard to tell apart, while on a latent with real
+    edges the detail term's trade is measurable — lower high-pass error, a
+    little more overall MSE.
+    """
+
+    def setUp(self):
+        torch.manual_seed(1234)
+        yy, xx = torch.meshgrid(torch.linspace(-1, 1, 32), torch.linspace(-1, 1, 32),
+                                indexing="ij")
+        channels = torch.stack([torch.sin(6 * xx + c) * torch.cos(5 * yy)
+                                for c in range(24)]).unsqueeze(0).unsqueeze(2)
+        self.full = channels.expand(1, 24, 4, 32, 32).contiguous()
+        self.full = self.full + 0.05 * torch.randn(1, 24, 4, 32, 32)
+        self.small = torch.nn.functional.interpolate(
+            self.full, size=(2, 8, 8), mode="trilinear", align_corners=False)
+
+    def upsample(self, refined):
+        return torch.nn.functional.interpolate(
+            refined.float(), size=tuple(self.full.shape[2:]),
+            mode="trilinear", align_corners=False)
+
+    def metrics(self, refined):
+        from core import _highpass
+        up = self.upsample(refined)
+        return (float(torch.nn.functional.mse_loss(up, self.full)),
+                float(torch.nn.functional.mse_loss(_highpass(up), _highpass(self.full))))
+
+    def test_detail_objective_trades_mse_for_edge_fidelity(self):
+        plain_mse, plain_edges = self.metrics(
+            optimize_latent(self.small, self.full, steps=200, lr=0.05, objective="mse"))
+        sharp_mse, sharp_edges = self.metrics(
+            optimize_latent(self.small, self.full, steps=200, lr=0.05, objective="detail"))
+        self.assertLess(sharp_edges, plain_edges,
+                        "the edge term must lower the high-pass error")
+        self.assertGreater(sharp_mse, plain_mse * 0.9,
+                           "the trade should stay visible, not silently dominate")
+
+    def test_mse_objective_is_unchanged_by_the_new_argument(self):
+        baseline = optimize_latent(self.small, self.full, steps=60, lr=0.05)
+        explicit = optimize_latent(self.small, self.full, steps=60, lr=0.05,
+                                   objective="mse")
+        self.assertTrue(torch.allclose(baseline, explicit))
+
+    def test_unknown_objective_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "objective"):
+            optimize_latent(self.small, self.full, steps=1, objective="vibes")
 
 
 if __name__ == "__main__":

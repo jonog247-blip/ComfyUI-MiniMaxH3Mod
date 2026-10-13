@@ -5,7 +5,8 @@ safetensors
 numpy
 Pillow
 
-# Optional video loader backends (soft-imported in common.py). Install one if
-# the Load H3 RefMod Folder node can't read your video files.
+# Optional video loader backends (soft-imported in common.py). PyAV, which
+# ComfyUI already depends on, is tried last, so nothing here is required —
+# install one of these only if you want the faster decoder.
 # opencv-python
 # imageio

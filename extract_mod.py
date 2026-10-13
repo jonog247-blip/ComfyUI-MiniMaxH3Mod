@@ -75,11 +75,11 @@ if ROOT not in sys.path:
 
 import torch
 
-from common import (cuda_fast_math, encode_ref_stills, ensure_min_size,
-                    load_image_file, load_video_file, mod_output_path,
-                    resolve_output_dir, resize_ref as _resize_ref,
-                    sample_video_for_vae, vae_output_on,
-                    warn_if_implausible_size)
+from common import (cuda_fast_math, duplicate_map, encode_ref_stills,
+                    ensure_min_size, load_image_file, load_video_file,
+                    mod_output_path, pipelined, resolve_output_dir,
+                    resize_ref as _resize_ref, sample_video_for_vae,
+                    vae_output_on, warn_if_implausible_size)
 from core import (CONCEPT_TYPE_CHOICES, H3RefMod, aspect_grid, fit_token_budget,
                   normalize_concept_type, normalize_mode, optimize_latent,
                   pool_latent)
@@ -235,6 +235,23 @@ def build_parser() -> argparse.ArgumentParser:
                     help="resize stills on the encode device instead of the CPU (default auto = "
                          "on for CUDA). Faster for large sources; 'never' keeps every pixel "
                          "operation on the CPU.")
+    ap.add_argument("--prefetch", type=int, default=2,
+                    help="decode/resize this many refs ahead of the VAE encode on worker "
+                         "threads (default 2; 1 = the old one-at-a-time loop). Keeps the GPU "
+                         "busy while the next file is still being read; results are yielded "
+                         "in order, so the mod is unchanged.")
+    ap.add_argument("--dedupe", choices=["on", "off"], default="on",
+                    help="skip source files that are byte-identical to an earlier one "
+                         "(default on). Saves a full VAE pass per repeat and the token "
+                         "budget it would waste; only exact duplicates are dropped.")
+    ap.add_argument("--refine-objective", choices=["mse", "detail"], default="mse",
+                    help="training mode: refinement objective. 'mse' (default, the historical "
+                         "one) matches energy and spends the step budget on broad shading; "
+                         "'detail' adds a Laplacian term so the pooled grid also has to "
+                         "reproduce edges — sharper structure, slightly higher overall MSE.")
+    ap.add_argument("--refine-detail-weight", type=float, default=1.0,
+                    help="weight of the edge term when --refine-objective detail "
+                         "(default 1.0; much higher starts costing more structure than it adds)")
     return ap
 
 
@@ -244,6 +261,13 @@ def prepare(args) -> None:
     args.concept_type = normalize_concept_type(args.concept_type) or "generic"
     if not args.image and not args.video:
         raise ValueError("provide at least one --image or --video")
+    if getattr(args, "dedupe", "on") == "on":
+        for key in ("image", "video"):
+            repeats = duplicate_map(getattr(args, key))
+            if repeats:
+                setattr(args, key, [p for p in getattr(args, key) if p not in repeats])
+        if not args.image and not args.video:
+            raise ValueError("every source file was a duplicate — nothing left to encode")
     if args.concept_type == "identity" and args.mode == "training" and args.pool < 16:
         print(
             f"[extract] warning: --concept-type identity with --mode training at "
@@ -321,20 +345,28 @@ def extract(args, vae, device) -> H3RefMod:
         if args.identity <= 0 or args.mode != "training":
             return pooled
         return optimize_latent(pooled, z, steps=args.identity, device=device,
-                               progress_every=100, tol=args.refine_tol)
+                               progress_every=100, tol=args.refine_tol,
+                               objective=args.refine_objective,
+                               detail_weight=args.refine_detail_weight)
 
     frames = []
     shapes = []
     n_img = n_vid = 0
+    prefetch = max(1, int(getattr(args, "prefetch", 1)))
+
+    def prepare_chunk(start):
+        """Decode + resize one batch of stills (runs on a prefetch thread)."""
+        prepared = []
+        for path in args.image[start:start + batch]:
+            src = _load_image(path, load_max_edge, resize_device)
+            src = ensure_min_size(_resize_ref(src, args.resolution, canvas, resize_device))
+            print(f"[extract] image {path}: {tuple(src.shape)} (mode={args.mode})")
+            prepared.append(src)
+        return prepared
+
     with cuda_fast_math(verbose=True):
-        for start in range(0, len(args.image), batch):
-            chunk = args.image[start:start + batch]
-            sources = []
-            for path in chunk:
-                src = _load_image(path, load_max_edge, resize_device)
-                src = ensure_min_size(_resize_ref(src, args.resolution, canvas, resize_device))
-                print(f"[extract] image {path}: {tuple(src.shape)} (mode={args.mode})")
-                sources.append(src)
+        for _start, sources in pipelined(range(0, len(args.image), batch),
+                                         prepare_chunk, workers=prefetch):
             with vae_output_on(vae, device), torch.no_grad():
                 zs = encode_ref_stills(vae, sources, device=device, max_batch=batch)
             del sources

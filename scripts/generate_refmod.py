@@ -250,6 +250,15 @@ def build_parser(extract_mod) -> argparse.ArgumentParser:
     ap.add_argument("--encode-batch", type=int, default=4,
                     help="still refs per VAE call on a GPU (1 = one at a time)")
     ap.add_argument("--resize-on-gpu", choices=["auto", "always", "never"], default="auto")
+    ap.add_argument("--prefetch", type=int, default=2,
+                    help="refs decoded/resized ahead of the VAE encode (default 2, 1 = sequential)")
+    ap.add_argument("--dedupe", choices=["on", "off"], default="on",
+                    help="skip byte-identical source files before encoding (default on)")
+    ap.add_argument("--refine-objective", choices=["mse", "detail"], default="mse",
+                    help="training mode refinement objective: 'detail' adds a Laplacian term so "
+                         "the pooled grid reproduces edges, not just broad shading")
+    ap.add_argument("--refine-detail-weight", type=float, default=1.0,
+                    help="weight of the edge term with --refine-objective detail")
     ap.add_argument("--description", default="", help="concept description stored in the mod")
     ap.add_argument("--output", default=None,
                     help="output dir (default: <comfy>/models/refmods)")
@@ -290,6 +299,10 @@ def extract_args_for(parser_args, extract_mod, images, videos, name: str,
     args.device = parser_args.device
     args.encode_batch = parser_args.encode_batch
     args.resize_on_gpu = parser_args.resize_on_gpu
+    args.prefetch = parser_args.prefetch
+    args.dedupe = parser_args.dedupe
+    args.refine_objective = parser_args.refine_objective
+    args.refine_detail_weight = parser_args.refine_detail_weight
     args.description = parser_args.description
     extract_mod.prepare(args)
     return args
